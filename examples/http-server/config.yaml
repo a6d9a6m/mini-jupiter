@@ -1,0 +1,16 @@
+app:
+  name: mini-jupiter
+  env: dev
+http:
+  addr: ":8080"
+log:
+  level: "info"
+  encoding: "console"
+metric:
+  enabled: true
+  path: "/metrics"
+  namespace: "mini_jupiter"
+ratelimit:
+  enabled: true
+  rate: 5
+  burst: 10
