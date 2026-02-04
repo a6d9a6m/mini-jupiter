@@ -18,3 +18,18 @@ ratelimit:
   enabled: true
   rate: 5
   burst: 10
+isolation:
+  enabled: true
+  routes:
+    /ping:
+      max_concurrent: 200
+      max_queue: 400
+      wait_timeout_ms: 50
+    /api/users:
+      max_concurrent: 50
+      max_queue: 100
+      wait_timeout_ms: 100
+    /jobs:
+      max_concurrent: 10
+      max_queue: 20
+      wait_timeout_ms: 200

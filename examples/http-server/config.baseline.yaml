@@ -18,3 +18,6 @@ ratelimit:
   enabled: false
   rate: 5
   burst: 10
+isolation:
+  enabled: false
+  routes: {}

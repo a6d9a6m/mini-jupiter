@@ -9,8 +9,9 @@ import (
 	"mini-jupiter/pkg/config"
 	apperr "mini-jupiter/pkg/errors"
 	applog "mini-jupiter/pkg/log"
+	"mini-jupiter/pkg/isolation"
 	"mini-jupiter/pkg/metric"
-	"mini-jupiter/pkg/middleware"
+	"mini-jupiter/internal/middleware"
 	"mini-jupiter/pkg/pool"
 	"mini-jupiter/pkg/ratelimiter"
 	"mini-jupiter/pkg/runtime"
@@ -29,6 +30,7 @@ type AppConfig struct {
 	Log applog.Config `mapstructure:"log" yaml:"log"`
 	Metric metric.Config `mapstructure:"metric" yaml:"metric"`
 	RateLimit ratelimiter.Config `mapstructure:"ratelimit" yaml:"ratelimit"`
+	Isolation isolation.Config `mapstructure:"isolation" yaml:"isolation"`
 	Middleware struct {
 		Recovery bool `mapstructure:"recovery" yaml:"recovery"`
 		TraceID  bool `mapstructure:"trace_id" yaml:"trace_id"`
@@ -71,6 +73,14 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("pong"))
 	})
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("slow ok"))
+	})
+	mux.HandleFunc("/panic", func(w http.ResponseWriter, _ *http.Request) {
+		panic("panic from /panic")
+	})
 	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "method not allowed"))
@@ -112,6 +122,10 @@ func main() {
 	if cfg.RateLimit.Enabled {
 		limiter = ratelimiter.New(cfg.RateLimit.Rate, cfg.RateLimit.Burst)
 	}
+	var isoMgr *isolation.Manager
+	if cfg.Isolation.Enabled {
+		isoMgr = isolation.NewManager(cfg.Isolation)
+	}
 
 	var middlewares []middleware.Middleware
 	if cfg.Middleware.Recovery {
@@ -119,6 +133,9 @@ func main() {
 	}
 	if cfg.Middleware.TraceID {
 		middlewares = append(middlewares, middleware.TraceID())
+	}
+	if isoMgr != nil {
+		middlewares = append(middlewares, middleware.Isolation(isoMgr))
 	}
 	if limiter != nil {
 		middlewares = append(middlewares, middleware.RateLimit(limiter))

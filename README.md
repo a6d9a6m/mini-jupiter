@@ -1,30 +1,35 @@
 # mini-jupiter
 
-一个轻量级 Go 后端基础框架练手项目，参考 Jupiter 的思路，目标是把配置、日志、中间件、错误处理、生命周期、指标、并发控制等“工程化基础能力”做成可复用模块，便于面试讲清楚设计与取舍。
+轻量级 Go 后端基础框架学习项目，参考 Jupiter 的设计思路，目标是把配置、日志、中间件、错误处理、生命周期、可观测性、并发治理等“工程化基础能力”做成可复用模块。
 
 ## 特性
 - 配置管理：文件 + 环境变量覆盖 + 热更新
 - 日志系统：结构化日志 + trace_id 注入
-- 中间件体系：Recovery / Logging / TraceID / RateLimit
+- 中间件体系：Recovery / Logging / TraceID / RateLimit / Isolation
 - 统一错误：业务错误码 + HTTP 映射 + JSON 响应
 - 生命周期：组件化启动/停止 + 优雅退出
-- 指标监控：Prometheus /metrics
-- 并发控制：Worker Pool 示例
+- 可观测性：Prometheus 指标 + Grafana 仪表盘
+- 并发治理：Worker Pool + 路由级并发隔离（并发/排队/超时）
 
 ## 目录结构
 ```
 mini-jupiter/
 ├─ examples/
 │  └─ http-server/            # 示例服务
+├─ internal/
+│  └─ middleware/             # 中间件链（接入层）
 ├─ pkg/
 │  ├─ config/                 # 配置管理
 │  ├─ log/                    # 日志封装
-│  ├─ middleware/             # 中间件链
 │  ├─ errors/                 # 错误体系
 │  ├─ runtime/                # 生命周期管理
 │  ├─ metric/                 # Prometheus 指标
 │  ├─ pool/                   # Worker Pool
-│  └─ ratelimiter/            # 令牌桶限流
+│  ├─ ratelimiter/            # 令牌桶限流
+│  └─ isolation/              # 并发隔离（核心逻辑）
+├─ grafana/                   # Grafana provision + dashboard
+├─ bench/                     # 压测脚本与结果
+├─ docker-compose.yml         # Prometheus + Grafana
 └─ prometheus.yml             # Prometheus 抓取配置（可选）
 ```
 
@@ -33,10 +38,12 @@ mini-jupiter/
 go run ./examples/http-server
 ```
 访问：
-- `GET /ping`
-- `GET /api/users`
-- `POST /jobs`
-- `GET /metrics`
+- `GET /ping`（正常）
+- `GET /api/users`（业务错误）
+- `GET /panic`（panic 触发 Recovery）
+- `GET /slow`（慢请求）
+- `POST /jobs`（异步任务）
+- `GET /metrics`（指标）
 
 ## 配置说明
 示例配置：`examples/http-server/config.yaml`
@@ -46,6 +53,7 @@ go run ./examples/http-server
 - `middleware`：中间件开关（Recovery/Trace/Logging）
 - `metric`：指标开关与路径
 - `ratelimit`：限流参数
+- `isolation`：并发隔离（每路由并发/排队/超时）
 
 ## 可观测闭环（Prometheus + Grafana）
 已补齐以下指标：
@@ -67,7 +75,7 @@ Grafana 已自动 provision：
 - 数据源：Prometheus
 - Dashboard：`Mini-Jupiter Overview`
 
-说明：该项目为练手，不考虑线上采样与性能开销的极致优化，仅用于展示“能定位问题”的闭环。
+说明：项目为学习用途，不考虑线上采样与性能开销的极致优化，仅用于展示“能定位问题”的闭环能力。
 
 ## 性能基线压测（hey）
 基线配置：`examples/http-server/config.baseline.yaml`（关闭中间件/指标/限流）
@@ -78,35 +86,15 @@ go install github.com/rakyll/hey@latest
 ```
 
 运行基线压测：
+- Windows：
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bench\run.ps1
+```
+- Linux/macOS（有 make 时）：
 ```bash
 make bench
 ```
 输出结果：`bench/results/baseline_*.txt`
-
-## 设计要点（面试可讲）
-- 统一入口与依赖隔离：业务只依赖 `pkg/*`，底层库可替换
-- 中间件洋葱模型：请求级能力可插拔
-- 配置热更新 + 并发安全：`atomic.Value` + 回调
-- 生命周期管理：组件接口统一 Start/Stop
-- 可观测性基础：日志 + 指标 + trace_id
-
-## Prometheus（可选）
-如需在 Docker Desktop 中抓取：
-```yaml
-global:
-  scrape_interval: 5s
-
-scrape_configs:
-  - job_name: "mini-jupiter"
-    static_configs:
-      - targets: ["host.docker.internal:8080"]
-```
-启动：
-```bash
-docker run --name prometheus -d -p 9090:9090 \
-  -v $PWD/prometheus.yml:/etc/prometheus/prometheus.yml \
-  prom/prometheus
-```
 
 ## 许可证
 MIT License. See `LICENSE`.
