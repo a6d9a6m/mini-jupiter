@@ -1,0 +1,23 @@
+﻿app:
+  name: mini-jupiter
+  env: bench
+http:
+  addr: ":8080"
+log:
+  level: "info"
+  encoding: "console"
+middleware:
+  recovery: false
+  trace_id: false
+  logging: true
+metric:
+  enabled: true
+  path: "/metrics"
+  namespace: "mini_jupiter"
+ratelimit:
+  enabled: false
+  rate: 5
+  burst: 10
+isolation:
+  enabled: false
+  routes: {}
