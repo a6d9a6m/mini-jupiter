@@ -1,20 +1,20 @@
 app:
   name: mini-jupiter
-  env: dev
+  env: baseline
 http:
   addr: ":8080"
 log:
   level: "info"
   encoding: "console"
 middleware:
-  recovery: true
-  trace_id: true
-  logging: true
+  recovery: false
+  trace_id: false
+  logging: false
 metric:
-  enabled: true
+  enabled: false
   path: "/metrics"
   namespace: "mini_jupiter"
 ratelimit:
-  enabled: true
+  enabled: false
   rate: 5
   burst: 10

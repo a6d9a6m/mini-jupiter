@@ -43,8 +43,23 @@ go run ./examples/http-server
 - `app`：应用信息
 - `http.addr`：监听地址
 - `log`：日志级别与格式
+- `middleware`：中间件开关（Recovery/Trace/Logging）
 - `metric`：指标开关与路径
 - `ratelimit`：限流参数
+
+## 性能基线压测（hey）
+基线配置：`examples/http-server/config.baseline.yaml`（关闭中间件/指标/限流）
+
+安装 hey：
+```bash
+go install github.com/rakyll/hey@latest
+```
+
+运行基线压测：
+```bash
+make bench
+```
+输出结果：`bench/results/baseline_*.txt`
 
 ## 设计要点（面试可讲）
 - 统一入口与依赖隔离：业务只依赖 `pkg/*`，底层库可替换

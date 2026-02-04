@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"os"
 	"time"
 
 	"mini-jupiter/pkg/config"
@@ -28,13 +29,22 @@ type AppConfig struct {
 	Log applog.Config `mapstructure:"log" yaml:"log"`
 	Metric metric.Config `mapstructure:"metric" yaml:"metric"`
 	RateLimit ratelimiter.Config `mapstructure:"ratelimit" yaml:"ratelimit"`
+	Middleware struct {
+		Recovery bool `mapstructure:"recovery" yaml:"recovery"`
+		TraceID  bool `mapstructure:"trace_id" yaml:"trace_id"`
+		Logging  bool `mapstructure:"logging" yaml:"logging"`
+	} `mapstructure:"middleware" yaml:"middleware"`
 }
 
 func main() {
 	//加载配置
 	var cfg AppConfig
+	configPath := os.Getenv("CONFIG_PATH")
+	if configPath == "" {
+		configPath = "examples/http-server/config.yaml"
+	}
 	_, err := config.Load(
-		"examples/http-server/config.yaml",
+		configPath,
 		&cfg,
 		config.WithWatch(),
 		config.WithOnChange(func(newCfg any) {
@@ -102,12 +112,20 @@ func main() {
 		limiter = ratelimiter.New(cfg.RateLimit.Rate, cfg.RateLimit.Burst)
 	}
 
-	handler := middleware.Chain(
-		middleware.Recovery(),
-		middleware.TraceID(),
-		middleware.RateLimit(limiter),
-		middleware.Logging(metrics),
-	)(mux)
+	var middlewares []middleware.Middleware
+	if cfg.Middleware.Recovery {
+		middlewares = append(middlewares, middleware.Recovery())
+	}
+	if cfg.Middleware.TraceID {
+		middlewares = append(middlewares, middleware.TraceID())
+	}
+	if limiter != nil {
+		middlewares = append(middlewares, middleware.RateLimit(limiter))
+	}
+	if cfg.Middleware.Logging {
+		middlewares = append(middlewares, middleware.Logging(metrics))
+	}
+	handler := middleware.Chain(middlewares...)(mux)
 	//创建sever
 	server := &http.Server{
 		Addr:    cfg.HTTP.Addr,
