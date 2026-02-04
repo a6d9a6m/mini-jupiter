@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: "mini-jupiter"
+    orgId: 1
+    folder: "Mini-Jupiter"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

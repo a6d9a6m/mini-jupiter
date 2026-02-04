@@ -13,6 +13,10 @@ import (
 func Logging(m *metric.Metrics) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if m != nil {
+				m.IncInFlight(r.Method, r.URL.Path)
+				defer m.DecInFlight(r.Method, r.URL.Path)
+			}
 			start := time.Now()
 			rec := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 

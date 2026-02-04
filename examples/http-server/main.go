@@ -73,15 +73,15 @@ func main() {
 	})
 	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			apperr.WriteHTTP(w, apperr.New(apperr.CodeBadRequest, "method not allowed"))
+			apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "method not allowed"))
 			return
 		}
-		apperr.WriteHTTP(w, apperr.New(apperr.CodeNotFound, "user not found"))
+		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeNotFound, "user not found"))
 	})
 	wp := pool.New(4, pool.WithBuffer(128), pool.WithTaskTimeout(3*time.Second))
 	mux.HandleFunc("/jobs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			apperr.WriteHTTP(w, apperr.New(apperr.CodeBadRequest, "method not allowed"))
+			apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "method not allowed"))
 			return
 		}
 		if err := wp.Submit(r.Context(), func(ctx context.Context) error {
@@ -94,7 +94,7 @@ func main() {
 				return ctx.Err()
 			}
 		}); err != nil {
-			apperr.WriteHTTP(w, apperr.New(apperr.CodeInternalError, "submit failed"))
+			apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeInternalError, "submit failed"))
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
@@ -105,6 +105,7 @@ func main() {
 	if cfg.Metric.Enabled {
 		metrics = metric.New(cfg.Metric)
 		mux.Handle(cfg.Metric.Path, metrics.Handler())
+		apperr.SetReporter(metrics.ObserveError)
 	}
 
 	var limiter *ratelimiter.Limiter

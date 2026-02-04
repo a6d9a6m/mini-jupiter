@@ -47,6 +47,28 @@ go run ./examples/http-server
 - `metric`：指标开关与路径
 - `ratelimit`：限流参数
 
+## 可观测闭环（Prometheus + Grafana）
+已补齐以下指标：
+- HTTP duration histogram（P95/P99）
+- inflight gauge
+- error counter（按 code）
+
+错误响应会携带 `trace_id`，便于从接口响应定位到对应日志。
+
+快速启动（Docker Desktop）：
+```bash
+docker compose up -d
+```
+访问：
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3000`（admin/admin）
+
+Grafana 已自动 provision：
+- 数据源：Prometheus
+- Dashboard：`Mini-Jupiter Overview`
+
+说明：该项目为练手，不考虑线上采样与性能开销的极致优化，仅用于展示“能定位问题”的闭环。
+
 ## 性能基线压测（hey）
 基线配置：`examples/http-server/config.baseline.yaml`（关闭中间件/指标/限流）
 

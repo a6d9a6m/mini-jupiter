@@ -24,3 +24,17 @@ func Wrap(code int, msg string, err error) *Error {
 func New(code int, msg string) *Error {
 	return &Error{Code: code, Message: msg}
 }
+
+type Reporter func(code int)
+
+var reporter Reporter
+
+func SetReporter(r Reporter) {
+	reporter = r
+}
+
+func report(code int) {
+	if reporter != nil {
+		reporter(code)
+	}
+}

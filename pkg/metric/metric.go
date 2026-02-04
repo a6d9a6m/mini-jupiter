@@ -17,6 +17,8 @@ type Config struct {
 type Metrics struct {
 	reqCount   *prometheus.CounterVec
 	reqLatency *prometheus.HistogramVec
+	inFlight   *prometheus.GaugeVec
+	errCount   *prometheus.CounterVec
 }
 
 func New(cfg Config) *Metrics {
@@ -42,8 +44,24 @@ func New(cfg Config) *Metrics {
 			},
 			[]string{"method", "path", "status"},
 		),
+		inFlight: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: ns,
+				Name:      "http_inflight_requests",
+				Help:      "Current number of in-flight HTTP requests.",
+			},
+			[]string{"method", "path"},
+		),
+		errCount: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: ns,
+				Name:      "http_error_total",
+				Help:      "Total number of error responses by error code.",
+			},
+			[]string{"code"},
+		),
 	}
-	prometheus.MustRegister(m.reqCount, m.reqLatency)
+	prometheus.MustRegister(m.reqCount, m.reqLatency, m.inFlight, m.errCount)
 	return m
 }
 
@@ -62,4 +80,33 @@ func (m *Metrics) Observe(method, path string, status int, seconds float64) {
 	}
 	m.reqCount.With(labels).Inc()
 	m.reqLatency.With(labels).Observe(seconds)
+}
+
+func (m *Metrics) IncInFlight(method, path string) {
+	if m == nil {
+		return
+	}
+	m.inFlight.With(prometheus.Labels{
+		"method": method,
+		"path":   path,
+	}).Inc()
+}
+
+func (m *Metrics) DecInFlight(method, path string) {
+	if m == nil {
+		return
+	}
+	m.inFlight.With(prometheus.Labels{
+		"method": method,
+		"path":   path,
+	}).Dec()
+}
+
+func (m *Metrics) ObserveError(code int) {
+	if m == nil {
+		return
+	}
+	m.errCount.With(prometheus.Labels{
+		"code": strconv.Itoa(code),
+	}).Inc()
 }
