@@ -237,6 +237,36 @@ WHERE task_id = ?
 	return dead, nextRetry, nil
 }
 
+func (r *Repository) ListDueFailedForCompensation(ctx context.Context, limit int) ([]int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT task_id
+FROM async_tasks
+WHERE status = ? AND next_retry_at IS NOT NULL AND next_retry_at <= ?
+ORDER BY next_retry_at ASC
+LIMIT ?
+`, StatusFailed, time.Now().UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list due failed tasks for compensation: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]int64, 0, limit)
+	for rows.Next() {
+		var taskID int64
+		if scanErr := rows.Scan(&taskID); scanErr != nil {
+			return nil, fmt.Errorf("scan due failed task id: %w", scanErr)
+		}
+		result = append(result, taskID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate due failed tasks: %w", err)
+	}
+	return result, nil
+}
+
 type taskRow interface {
 	Scan(dest ...any) error
 }

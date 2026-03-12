@@ -40,8 +40,9 @@ type AppConfig struct {
 		} `mapstructure:"claim" yaml:"claim"`
 	} `mapstructure:"coupon" yaml:"coupon"`
 	Task struct {
-		Queue   task.QueueConfig   `mapstructure:"queue" yaml:"queue"`
-		Consume task.ConsumeConfig `mapstructure:"consume" yaml:"consume"`
+		Queue        task.QueueConfig        `mapstructure:"queue" yaml:"queue"`
+		Consume      task.ConsumeConfig      `mapstructure:"consume" yaml:"consume"`
+		Compensation task.CompensationConfig `mapstructure:"compensation" yaml:"compensation"`
 	} `mapstructure:"task" yaml:"task"`
 	Outbox struct {
 		Relay outbox.RelayConfig `mapstructure:"relay" yaml:"relay"`
@@ -108,9 +109,10 @@ func main() {
 	handler := coupon.NewHandler(svc)
 
 	var (
-		taskQueue *task.Queue
-		relayComp *outbox.Relay
-		consumer  *task.Consumer
+		taskQueue      *task.Queue
+		relayComp      *outbox.Relay
+		consumer       *task.Consumer
+		taskCompensate *task.Compensator
 	)
 	if redisClient != nil {
 		q, err := task.NewQueue(redisClient, cfg.Task.Queue)
@@ -132,6 +134,12 @@ func main() {
 			applog.L(context.Background()).Fatal("task consumer init failed", zap.Error(err))
 		}
 		consumer = c
+
+		compensator, err := task.NewCompensator(taskRepo, taskQueue, cfg.Task.Compensation)
+		if err != nil {
+			applog.L(context.Background()).Fatal("task compensator init failed", zap.Error(err))
+		}
+		taskCompensate = compensator
 	}
 
 	taskService := task.NewServiceWithQueue(txm, taskRepo, outboxRepo, taskQueue, cfg.Task.Consume.DefaultMaxRetry)
@@ -189,6 +197,9 @@ func main() {
 	}
 	if consumer != nil {
 		app.Use(consumer)
+	}
+	if taskCompensate != nil {
+		app.Use(taskCompensate)
 	}
 	app.Use(&httpComponent{server: server})
 

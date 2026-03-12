@@ -56,6 +56,10 @@ task:
     poll_interval: "200ms"
     ready_timeout: "1s"
     retry_move_batch: 100
+  compensation:
+    enabled: false
+    poll_interval: "1s"
+    batch_size: 100
 
 outbox:
   relay:
