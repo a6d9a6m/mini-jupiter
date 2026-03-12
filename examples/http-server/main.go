@@ -6,14 +6,15 @@ import (
 	"os"
 	"time"
 
+	"mini-jupiter/internal/middleware"
 	"mini-jupiter/pkg/config"
 	apperr "mini-jupiter/pkg/errors"
-	applog "mini-jupiter/pkg/log"
 	"mini-jupiter/pkg/isolation"
+	applog "mini-jupiter/pkg/log"
 	"mini-jupiter/pkg/metric"
-	"mini-jupiter/internal/middleware"
 	"mini-jupiter/pkg/pool"
 	"mini-jupiter/pkg/ratelimiter"
+	"mini-jupiter/pkg/redis"
 	"mini-jupiter/pkg/runtime"
 
 	"go.uber.org/zap"
@@ -27,10 +28,11 @@ type AppConfig struct {
 	HTTP struct {
 		Addr string `mapstructure:"addr" yaml:"addr"`
 	} `mapstructure:"http" yaml:"http"`
-	Log applog.Config `mapstructure:"log" yaml:"log"`
-	Metric metric.Config `mapstructure:"metric" yaml:"metric"`
-	RateLimit ratelimiter.Config `mapstructure:"ratelimit" yaml:"ratelimit"`
-	Isolation isolation.Config `mapstructure:"isolation" yaml:"isolation"`
+	Log        applog.Config      `mapstructure:"log" yaml:"log"`
+	Metric     metric.Config      `mapstructure:"metric" yaml:"metric"`
+	Redis      redis.Config       `mapstructure:"redis" yaml:"redis"`
+	RateLimit  ratelimiter.Config `mapstructure:"ratelimit" yaml:"ratelimit"`
+	Isolation  isolation.Config   `mapstructure:"isolation" yaml:"isolation"`
 	Middleware struct {
 		Recovery bool `mapstructure:"recovery" yaml:"recovery"`
 		TraceID  bool `mapstructure:"trace_id" yaml:"trace_id"`
@@ -88,6 +90,52 @@ func main() {
 		}
 		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeNotFound, "user not found"))
 	})
+
+	var redisComp *redis.Component
+	if cfg.Redis.Enabled {
+		c, err := redis.NewComponent(cfg.Redis)
+		if err != nil {
+			applog.L(context.Background()).Fatal("redis init failed", zap.Error(err))
+		}
+		redisComp = c
+
+		mux.HandleFunc("/cache/set", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "method not allowed"))
+				return
+			}
+			key := r.URL.Query().Get("key")
+			val := r.URL.Query().Get("val")
+			if key == "" {
+				apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "missing key"))
+				return
+			}
+			if err := redisComp.Client().Raw().Set(r.Context(), key, val, 0).Err(); err != nil {
+				apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeInternalError, "redis set failed"))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
+		mux.HandleFunc("/cache/get", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "method not allowed"))
+				return
+			}
+			key := r.URL.Query().Get("key")
+			if key == "" {
+				apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "missing key"))
+				return
+			}
+			v, err := redisComp.Client().Raw().Get(r.Context(), key).Result()
+			if err != nil {
+				apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeNotFound, "not found"))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(v))
+		})
+	}
 	wp := pool.New(4, pool.WithBuffer(128), pool.WithTaskTimeout(3*time.Second))
 	mux.HandleFunc("/jobs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -152,6 +200,9 @@ func main() {
 	//组件注册
 	app := runtime.NewWithOptions(runtime.WithStopTimeout(8 * time.Second))
 	app.Use(&httpComponent{server: server}, &poolComponent{pool: wp})
+	if redisComp != nil {
+		app.Use(redisComp)
+	}
 	//启动app
 	if err := app.Start(context.Background()); err != nil {
 		applog.L(context.Background()).Fatal("app start failed", zap.Error(err))

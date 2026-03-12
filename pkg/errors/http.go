@@ -16,6 +16,8 @@ func HTTPStatus(err error) int {
 		switch e.Code {
 		case CodeBadRequest:
 			return http.StatusBadRequest
+		case CodeConflict:
+			return http.StatusConflict
 		case CodeTooManyRequests:
 			return http.StatusTooManyRequests
 		case CodeNotFound:

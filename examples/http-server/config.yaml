@@ -14,6 +14,12 @@ metric:
   enabled: true
   path: "/metrics"
   namespace: "mini_jupiter"
+redis:
+  enabled: false
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  dial_timeout: "2s"
 ratelimit:
   enabled: true
   rate: 5
