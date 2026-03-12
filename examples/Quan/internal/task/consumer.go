@@ -48,6 +48,7 @@ type Consumer struct {
 	repo     consumerRepository
 	queue    consumerQueue
 	registry *HandlerRegistry
+	metrics  consumerMetrics
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -65,6 +66,20 @@ type consumerQueue interface {
 	PushDLQ(ctx context.Context, taskID int64) error
 	ScheduleRetry(ctx context.Context, taskID int64, retryAt time.Time) error
 }
+
+type consumerMetrics interface {
+	IncTaskRetry()
+	IncTaskDLQ()
+	IncConsumeSuccess()
+	IncConsumeFailure()
+}
+
+type noopConsumerMetrics struct{}
+
+func (noopConsumerMetrics) IncTaskRetry()      {}
+func (noopConsumerMetrics) IncTaskDLQ()        {}
+func (noopConsumerMetrics) IncConsumeSuccess() {}
+func (noopConsumerMetrics) IncConsumeFailure() {}
 
 func NewConsumer(repo consumerRepository, queue consumerQueue, registry *HandlerRegistry, cfg ConsumeConfig) (*Consumer, error) {
 	cfg = cfg.withDefaults()
@@ -85,7 +100,15 @@ func NewConsumer(repo consumerRepository, queue consumerQueue, registry *Handler
 		repo:     repo,
 		queue:    queue,
 		registry: registry,
+		metrics:  noopConsumerMetrics{},
 	}, nil
+}
+
+func (c *Consumer) SetMetrics(metrics consumerMetrics) {
+	if c == nil || metrics == nil {
+		return
+	}
+	c.metrics = metrics
 }
 
 func (c *Consumer) Start(ctx context.Context) error {
@@ -176,11 +199,13 @@ func (c *Consumer) consumeTask(ctx context.Context, taskID int64, workerID int) 
 	}
 
 	if err := c.registry.Handle(ctx, task); err != nil {
+		c.metrics.IncConsumeFailure()
 		dead, nextRetry, markErr := c.repo.MarkFailed(ctx, task.ID, err.Error(), c.cfg.RetryBackoff)
 		if markErr != nil {
 			return markErr
 		}
 		if dead {
+			c.metrics.IncTaskDLQ()
 			if pushErr := c.queue.PushDLQ(ctx, task.ID); pushErr != nil {
 				return fmt.Errorf("push task to dlq failed: %w", pushErr)
 			}
@@ -188,6 +213,7 @@ func (c *Consumer) consumeTask(ctx context.Context, taskID int64, workerID int) 
 			return nil
 		}
 		if nextRetry != nil {
+			c.metrics.IncTaskRetry()
 			if scheduleErr := c.queue.ScheduleRetry(ctx, task.ID, *nextRetry); scheduleErr != nil {
 				return fmt.Errorf("schedule task retry failed: %w", scheduleErr)
 			}
@@ -198,6 +224,7 @@ func (c *Consumer) consumeTask(ctx context.Context, taskID int64, workerID int) 
 	if err := c.repo.MarkSuccess(ctx, task.ID); err != nil {
 		return err
 	}
+	c.metrics.IncConsumeSuccess()
 	applog.L(ctx).Info("task consumed successfully", zap.Int("worker_id", workerID), zap.Int64("task_id", task.ID))
 	return nil
 }

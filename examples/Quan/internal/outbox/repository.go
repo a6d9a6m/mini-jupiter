@@ -80,6 +80,18 @@ LIMIT ?
 	return events, nil
 }
 
+func (r *Repository) CountPending(ctx context.Context) (int64, error) {
+	var cnt int64
+	if err := r.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM outbox_events
+WHERE status = ?
+`, StatusPending).Scan(&cnt); err != nil {
+		return 0, fmt.Errorf("count pending outbox events: %w", err)
+	}
+	return cnt, nil
+}
+
 func (r *Repository) MarkPublished(ctx context.Context, eventID int64) error {
 	_, err := r.db.ExecContext(ctx, `
 UPDATE outbox_events

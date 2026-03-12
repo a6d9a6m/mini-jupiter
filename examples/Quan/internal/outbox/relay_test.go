@@ -33,6 +33,12 @@ func (f *fakeRelayRepo) ListDispatchable(_ context.Context, _ int) ([]Event, err
 	return cp, nil
 }
 
+func (f *fakeRelayRepo) CountPending(_ context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return int64(len(f.events)), nil
+}
+
 func (f *fakeRelayRepo) MarkPublished(_ context.Context, eventID int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

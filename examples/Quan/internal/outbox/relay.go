@@ -39,6 +39,7 @@ type Relay struct {
 	cfg       RelayConfig
 	repo      relayRepository
 	publisher ReadyPublisher
+	metrics   relayMetrics
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -46,9 +47,18 @@ type Relay struct {
 
 type relayRepository interface {
 	ListDispatchable(ctx context.Context, limit int) ([]Event, error)
+	CountPending(ctx context.Context) (int64, error)
 	MarkPublished(ctx context.Context, eventID int64) error
 	MarkRetry(ctx context.Context, eventID int64, delay time.Duration, lastErr string) error
 }
+
+type relayMetrics interface {
+	SetOutboxPending(v float64)
+}
+
+type noopRelayMetrics struct{}
+
+func (noopRelayMetrics) SetOutboxPending(_ float64) {}
 
 func NewRelay(repo relayRepository, publisher ReadyPublisher, cfg RelayConfig) (*Relay, error) {
 	cfg = cfg.withDefaults()
@@ -65,7 +75,15 @@ func NewRelay(repo relayRepository, publisher ReadyPublisher, cfg RelayConfig) (
 		cfg:       cfg,
 		repo:      repo,
 		publisher: publisher,
+		metrics:   noopRelayMetrics{},
 	}, nil
+}
+
+func (r *Relay) SetMetrics(metrics relayMetrics) {
+	if r == nil || metrics == nil {
+		return
+	}
+	r.metrics = metrics
 }
 
 func (r *Relay) Start(ctx context.Context) error {
@@ -97,6 +115,9 @@ func (r *Relay) run(ctx context.Context) {
 	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
+		if cnt, err := r.repo.CountPending(ctx); err == nil {
+			r.metrics.SetOutboxPending(float64(cnt))
+		}
 		if err := r.dispatchOnce(ctx); err != nil {
 			applog.L(ctx).Error("outbox relay dispatch failed", zap.Error(err))
 		}

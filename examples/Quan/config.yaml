@@ -9,6 +9,11 @@ log:
   level: "info"
   encoding: "console"
 
+metric:
+  enabled: true
+  path: "/metrics"
+  namespace: "mini_jupiter_quan"
+
 middleware:
   recovery: true
   trace_id: true
