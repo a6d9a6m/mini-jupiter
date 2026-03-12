@@ -43,3 +43,55 @@ jobs:
           cache: true
       - name: build
         run: go build ./examples/http-server
+
+  quan-integration:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: mini_jupiter
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+    env:
+      QUAN_TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4
+      QUAN_TEST_REDIS_ADDR: 127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: wait mysql
+        run: |
+          for i in {1..40}; do
+            (echo > /dev/tcp/127.0.0.1/3306) >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: wait redis
+        run: |
+          for i in {1..40}; do
+            (echo > /dev/tcp/127.0.0.1/6379) >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: quan repository integration tests
+        run: go test ./examples/Quan/internal/coupon -run TestRepository_ -v
+      - name: quan e2e fault injection tests
+        run: go test ./examples/Quan/internal/task -run TestE2E_ -v
