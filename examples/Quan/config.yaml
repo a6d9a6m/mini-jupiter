@@ -1,0 +1,60 @@
+app:
+  name: mini-jupiter-quan
+  env: dev
+
+http:
+  addr: ":8081"
+
+log:
+  level: "info"
+  encoding: "console"
+
+middleware:
+  recovery: true
+  trace_id: true
+  logging: true
+
+redis:
+  enabled: false
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  dial_timeout: "2s"
+
+mysql:
+  enabled: true
+  dsn: "root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4"
+  max_open_conns: 50
+  max_idle_conns: 10
+  conn_max_lifetime: "30m"
+  conn_timeout: "2s"
+
+migration:
+  enabled: true
+  dir: "examples/Quan/sql"
+  table_name: "schema_migrations"
+
+coupon:
+  claim:
+    idempotency_ttl: "24h"
+
+task:
+  queue:
+    ready_key: "queue:task:ready"
+    retry_key: "queue:task:retry"
+    dlq_key: "queue:task:dlq"
+  consume:
+    enabled: false
+    workers: 4
+    max_retry: 5
+    retry_backoff: "2s"
+    poll_interval: "200ms"
+    ready_timeout: "1s"
+    retry_move_batch: 100
+
+outbox:
+  relay:
+    enabled: false
+    poll_interval: "500ms"
+    batch_size: 100
+    backoff_base: "1s"
