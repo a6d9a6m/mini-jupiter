@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	ErrTaskDuplicate = errors.New("task duplicate")
-	ErrTaskNotFound  = errors.New("task not found")
+	ErrTaskDuplicate     = errors.New("task duplicate")
+	ErrTaskNotFound      = errors.New("task not found")
+	ErrTaskNotReplayable = errors.New("task not replayable")
 )
 
 type Repository struct {
@@ -132,6 +133,46 @@ WHERE task_id = ? AND status = ?
 `, StatusSuccess, time.Now().UTC(), taskID, StatusRunning)
 	if err != nil {
 		return fmt.Errorf("mark task success: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) MarkReplayReady(ctx context.Context, taskID int64) error {
+	res, err := r.db.ExecContext(ctx, `
+UPDATE async_tasks
+SET status = ?, next_retry_at = NULL, updated_at = ?
+WHERE task_id = ? AND status IN (?, ?)
+`, StatusFailed, time.Now().UTC(), taskID, StatusDead, StatusFailed)
+	if err != nil {
+		return fmt.Errorf("mark task replay ready: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark task replay ready rows affected: %w", err)
+	}
+	if affected > 0 {
+		return nil
+	}
+
+	var status string
+	err = r.db.QueryRowContext(ctx, `SELECT status FROM async_tasks WHERE task_id = ? LIMIT 1`, taskID).Scan(&status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrTaskNotFound
+		}
+		return fmt.Errorf("query task replay status: %w", err)
+	}
+	return fmt.Errorf("%w: status=%s", ErrTaskNotReplayable, status)
+}
+
+func (r *Repository) RestoreDeadAfterReplayFailure(ctx context.Context, taskID int64) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE async_tasks
+SET status = ?, updated_at = ?
+WHERE task_id = ? AND status = ?
+`, StatusDead, time.Now().UTC(), taskID, StatusFailed)
+	if err != nil {
+		return fmt.Errorf("restore dead task after replay failure: %w", err)
 	}
 	return nil
 }

@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"mini-jupiter/examples/Quan/internal/coupon"
+	"mini-jupiter/examples/Quan/internal/observability"
 	"mini-jupiter/examples/Quan/internal/outbox"
 	"mini-jupiter/examples/Quan/internal/task"
 	"mini-jupiter/internal/middleware"
 	"mini-jupiter/pkg/config"
 	applog "mini-jupiter/pkg/log"
+	"mini-jupiter/pkg/metric"
 	"mini-jupiter/pkg/mysql"
 	"mini-jupiter/pkg/redis"
 	"mini-jupiter/pkg/runtime"
@@ -28,6 +30,7 @@ type AppConfig struct {
 		Addr string `mapstructure:"addr" yaml:"addr"`
 	} `mapstructure:"http" yaml:"http"`
 	Log       applog.Config         `mapstructure:"log" yaml:"log"`
+	Metric    metric.Config         `mapstructure:"metric" yaml:"metric"`
 	Redis     redis.Config          `mapstructure:"redis" yaml:"redis"`
 	MySQL     mysql.Config          `mapstructure:"mysql" yaml:"mysql"`
 	Migration mysql.MigrationConfig `mapstructure:"migration" yaml:"migration"`
@@ -104,9 +107,6 @@ func main() {
 	svc := coupon.NewService(repo, redisClient, cfg.Coupon.Claim.IdempotencyTTL)
 	handler := coupon.NewHandler(svc)
 
-	taskService := task.NewService(txm, taskRepo, outboxRepo, cfg.Task.Consume.DefaultMaxRetry)
-	taskHTTPHandler := task.NewHTTPHandler(taskService)
-
 	var (
 		taskQueue *task.Queue
 		relayComp *outbox.Relay
@@ -134,13 +134,33 @@ func main() {
 		consumer = c
 	}
 
+	taskService := task.NewServiceWithQueue(txm, taskRepo, outboxRepo, taskQueue, cfg.Task.Consume.DefaultMaxRetry)
+	taskHTTPHandler := task.NewHTTPHandler(taskService)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("pong"))
 	})
+	var quanMetrics *observability.Metrics
+	if cfg.Metric.Enabled {
+		quanMetrics = observability.New(cfg.Metric.Namespace, nil, nil)
+		metricPath := cfg.Metric.Path
+		if metricPath == "" {
+			metricPath = "/metrics"
+		}
+		mux.Handle(metricPath, quanMetrics.Handler())
+	}
 	handler.Register(mux)
 	taskHTTPHandler.Register(mux)
+	if quanMetrics != nil {
+		if relayComp != nil {
+			relayComp.SetMetrics(quanMetrics)
+		}
+		if consumer != nil {
+			consumer.SetMetrics(quanMetrics)
+		}
+	}
 
 	var middlewares []middleware.Middleware
 	if cfg.Middleware.Recovery {

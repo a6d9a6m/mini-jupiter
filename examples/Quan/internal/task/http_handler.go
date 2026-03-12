@@ -27,6 +27,7 @@ func NewHTTPHandler(svc *Service) *HTTPHandler {
 func (h *HTTPHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/tasks", h.createTask)
 	mux.HandleFunc("GET /api/v1/tasks/{task_id}", h.getTask)
+	mux.HandleFunc("POST /api/v1/tasks/{task_id}/replay", h.replayTask)
 }
 
 type createTaskRequest struct {
@@ -93,6 +94,22 @@ func (h *HTTPHandler) getTask(w http.ResponseWriter, r *http.Request) {
 		resp["next_retry_at"] = taskRec.NextRetry.UTC().Format(timeLayoutRFC3339Milli)
 	}
 	writeOK(r.Context(), w, resp)
+}
+
+func (h *HTTPHandler) replayTask(w http.ResponseWriter, r *http.Request) {
+	taskID, ok := parsePositiveInt64(r.PathValue("task_id"))
+	if !ok {
+		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "invalid task_id"))
+		return
+	}
+	if err := h.svc.ReplayDLQTask(r.Context(), taskID); err != nil {
+		apperr.WriteHTTPWithContext(r.Context(), w, err)
+		return
+	}
+	writeOK(r.Context(), w, map[string]any{
+		"task_id":  taskID,
+		"replayed": true,
+	})
 }
 
 const timeLayoutRFC3339Milli = "2006-01-02T15:04:05.000Z07:00"

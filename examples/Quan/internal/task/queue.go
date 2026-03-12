@@ -53,6 +53,33 @@ func (q *Queue) PushDLQ(ctx context.Context, taskID int64) error {
 	return q.rdb.RPush(ctx, q.cfg.DLQKey, strconv.FormatInt(taskID, 10)).Err()
 }
 
+func (q *Queue) ReplayFromDLQ(ctx context.Context, taskID int64) (bool, error) {
+	task := strconv.FormatInt(taskID, 10)
+	res, err := q.rdb.Eval(ctx, `
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if removed > 0 then
+  redis.call('RPUSH', KEYS[2], ARGV[1])
+end
+return removed
+`, []string{q.cfg.DLQKey, q.cfg.ReadyKey}, task).Int64()
+	if err != nil {
+		return false, err
+	}
+	return res > 0, nil
+}
+
+func (q *Queue) RollbackReplay(ctx context.Context, taskID int64) error {
+	task := strconv.FormatInt(taskID, 10)
+	_, err := q.rdb.Eval(ctx, `
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if removed > 0 then
+  redis.call('LPUSH', KEYS[2], ARGV[1])
+end
+return removed
+`, []string{q.cfg.ReadyKey, q.cfg.DLQKey}, task).Result()
+	return err
+}
+
 func (q *Queue) ScheduleRetry(ctx context.Context, taskID int64, retryAt time.Time) error {
 	score := float64(retryAt.UnixMilli())
 	return q.rdb.ZAdd(ctx, q.cfg.RetryKey, goredis.Z{
