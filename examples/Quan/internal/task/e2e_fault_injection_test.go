@@ -155,6 +155,82 @@ func TestE2E_TaskPipeline_DLQReplay_ManualRecover(t *testing.T) {
 	}
 }
 
+func TestE2E_TaskPipeline_RetryScheduleFailure_RecoveredByCompensation(t *testing.T) {
+	db := openTaskIntegrationDB(t)
+	redisClient := openTaskIntegrationRedis(t)
+	ctx := context.Background()
+
+	txm, err := mysql.NewTxManager(db)
+	if err != nil {
+		t.Fatalf("new tx manager failed: %v", err)
+	}
+	outboxRepo := outbox.NewRepository(db)
+	taskRepo := NewRepository(db, txm)
+	realQueue, err := NewQueue(redisClient, QueueConfig{})
+	if err != nil {
+		t.Fatalf("new queue failed: %v", err)
+	}
+	queue := newScheduleFailureQueue(realQueue, 1)
+
+	handler := &flakyTaskHandler{failTimes: 1}
+	registry := NewHandlerRegistry()
+	registry.Register(TaskTypeSendCouponNotice, handler)
+
+	relay, err := outbox.NewRelay(outboxRepo, queue, outbox.RelayConfig{
+		Enabled:      true,
+		PollInterval: 20 * time.Millisecond,
+		BatchSize:    100,
+		BackoffBase:  20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new relay failed: %v", err)
+	}
+	consumer, err := NewConsumer(taskRepo, queue, registry, ConsumeConfig{
+		Enabled:         true,
+		Workers:         1,
+		PollInterval:    20 * time.Millisecond,
+		ReadyTimeout:    1 * time.Second,
+		RetryBackoff:    20 * time.Millisecond,
+		RetryMoveBatch:  100,
+		DefaultMaxRetry: 3,
+	})
+	if err != nil {
+		t.Fatalf("new consumer failed: %v", err)
+	}
+	compensator, err := NewCompensator(taskRepo, queue, CompensationConfig{
+		Enabled:      true,
+		PollInterval: 20 * time.Millisecond,
+		BatchSize:    100,
+	})
+	if err != nil {
+		t.Fatalf("new compensator failed: %v", err)
+	}
+
+	startBackgroundComponents(t, ctx, relay, consumer)
+	if err := compensator.Start(ctx); err != nil {
+		t.Fatalf("start compensator failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = compensator.Stop(context.Background())
+	})
+
+	taskService := NewServiceWithQueue(txm, taskRepo, outboxRepo, nil, 3)
+	server := newTaskHTTPServer(taskService)
+	defer server.Close()
+
+	taskID := createTaskViaHTTP(t, server.URL, "e2e_compensate_"+strconv.FormatInt(time.Now().UnixNano(), 10), 3)
+	rec := waitTaskStatus(t, taskRepo, taskID, StatusSuccess, 10*time.Second)
+	if rec.RetryCount < 1 {
+		t.Fatalf("expected retry_count >= 1, got %d", rec.RetryCount)
+	}
+	if queue.FailedScheduleCalls() < 1 {
+		t.Fatalf("expected injected schedule failure to happen")
+	}
+	if pending := countPendingOutbox(t, db); pending != 0 {
+		t.Fatalf("expected outbox pending = 0, got %d", pending)
+	}
+}
+
 func startBackgroundComponents(t *testing.T, ctx context.Context, relay *outbox.Relay, consumer *Consumer) {
 	t.Helper()
 	if err := relay.Start(ctx); err != nil {
@@ -413,4 +489,54 @@ func (h *toggleTaskHandler) Handle(_ context.Context, _ AsyncTask) error {
 
 func (h *toggleTaskHandler) SetFail(v bool) {
 	h.fail.Store(v)
+}
+
+type scheduleFailureQueue struct {
+	inner           *Queue
+	remainFailCalls atomic.Int32
+	failedCalls     atomic.Int32
+}
+
+func newScheduleFailureQueue(inner *Queue, failCalls int32) *scheduleFailureQueue {
+	q := &scheduleFailureQueue{inner: inner}
+	q.remainFailCalls.Store(failCalls)
+	return q
+}
+
+func (q *scheduleFailureQueue) PublishReady(ctx context.Context, taskID int64) error {
+	return q.inner.PublishReady(ctx, taskID)
+}
+
+func (q *scheduleFailureQueue) PushDLQ(ctx context.Context, taskID int64) error {
+	return q.inner.PushDLQ(ctx, taskID)
+}
+
+func (q *scheduleFailureQueue) ReplayFromDLQ(ctx context.Context, taskID int64) (bool, error) {
+	return q.inner.ReplayFromDLQ(ctx, taskID)
+}
+
+func (q *scheduleFailureQueue) MoveDueRetryToReady(ctx context.Context, batch int) (int, error) {
+	return q.inner.MoveDueRetryToReady(ctx, batch)
+}
+
+func (q *scheduleFailureQueue) PopReady(ctx context.Context, timeout time.Duration) (int64, bool, error) {
+	return q.inner.PopReady(ctx, timeout)
+}
+
+func (q *scheduleFailureQueue) ScheduleRetry(ctx context.Context, taskID int64, retryAt time.Time) error {
+	for {
+		remain := q.remainFailCalls.Load()
+		if remain <= 0 {
+			break
+		}
+		if q.remainFailCalls.CompareAndSwap(remain, remain-1) {
+			q.failedCalls.Add(1)
+			return errors.New("injected schedule retry failure")
+		}
+	}
+	return q.inner.ScheduleRetry(ctx, taskID, retryAt)
+}
+
+func (q *scheduleFailureQueue) FailedScheduleCalls() int32 {
+	return q.failedCalls.Load()
 }
