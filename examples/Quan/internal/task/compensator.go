@@ -15,6 +15,7 @@ type CompensationConfig struct {
 	Enabled      bool          `mapstructure:"enabled" yaml:"enabled"`
 	PollInterval time.Duration `mapstructure:"poll_interval" yaml:"poll_interval"`
 	BatchSize    int           `mapstructure:"batch_size" yaml:"batch_size"`
+	StaleTimeout time.Duration `mapstructure:"stale_timeout" yaml:"stale_timeout"`
 }
 
 func (c CompensationConfig) withDefaults() CompensationConfig {
@@ -23,6 +24,9 @@ func (c CompensationConfig) withDefaults() CompensationConfig {
 	}
 	if c.BatchSize <= 0 {
 		c.BatchSize = 100
+	}
+	if c.StaleTimeout <= 0 {
+		c.StaleTimeout = 5 * time.Second
 	}
 	return c
 }
@@ -38,6 +42,9 @@ type Compensator struct {
 
 type compensationRepository interface {
 	ListDueFailedForCompensation(ctx context.Context, limit int) ([]int64, error)
+	ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error)
+	ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error)
+	MarkRecoveredForRetry(ctx context.Context, taskID int64, lastErr string) (bool, error)
 }
 
 type compensationQueue interface {
@@ -107,8 +114,38 @@ func (c *Compensator) compensateOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(taskIDs) == 0 {
+	staleBefore := time.Now().UTC().Add(-c.cfg.StaleTimeout)
+	suspendedIDs, err := c.repo.ListSuspendedForCompensation(ctx, staleBefore, c.cfg.BatchSize)
+	if err != nil {
+		return err
+	}
+	staleRunningIDs, err := c.repo.ListStaleRunningForCompensation(ctx, staleBefore, c.cfg.BatchSize)
+	if err != nil {
+		return err
+	}
+	if len(taskIDs) == 0 && len(suspendedIDs) == 0 && len(staleRunningIDs) == 0 {
 		return nil
+	}
+
+	for _, taskID := range staleRunningIDs {
+		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, taskID, "stale RUNNING recovered for retry")
+		if recoverErr != nil {
+			applog.L(ctx).Warn("recover stale running task failed", zap.Int64("task_id", taskID), zap.Error(recoverErr))
+			continue
+		}
+		if ok {
+			taskIDs = append(taskIDs, taskID)
+		}
+	}
+	for _, taskID := range suspendedIDs {
+		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, taskID, "suspended task recovered for retry")
+		if recoverErr != nil {
+			applog.L(ctx).Warn("recover suspended task failed", zap.Int64("task_id", taskID), zap.Error(recoverErr))
+			continue
+		}
+		if ok {
+			taskIDs = append(taskIDs, taskID)
+		}
 	}
 
 	now := time.Now().UTC()

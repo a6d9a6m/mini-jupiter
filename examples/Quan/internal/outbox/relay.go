@@ -16,10 +16,11 @@ type ReadyPublisher interface {
 }
 
 type RelayConfig struct {
-	Enabled      bool          `mapstructure:"enabled" yaml:"enabled"`
-	PollInterval time.Duration `mapstructure:"poll_interval" yaml:"poll_interval"`
-	BatchSize    int           `mapstructure:"batch_size" yaml:"batch_size"`
-	BackoffBase  time.Duration `mapstructure:"backoff_base" yaml:"backoff_base"`
+	Enabled         bool          `mapstructure:"enabled" yaml:"enabled"`
+	PollInterval    time.Duration `mapstructure:"poll_interval" yaml:"poll_interval"`
+	BatchSize       int           `mapstructure:"batch_size" yaml:"batch_size"`
+	BackoffBase     time.Duration `mapstructure:"backoff_base" yaml:"backoff_base"`
+	DispatchTimeout time.Duration `mapstructure:"dispatch_timeout" yaml:"dispatch_timeout"`
 }
 
 func (c RelayConfig) withDefaults() RelayConfig {
@@ -31,6 +32,9 @@ func (c RelayConfig) withDefaults() RelayConfig {
 	}
 	if c.BackoffBase <= 0 {
 		c.BackoffBase = 1 * time.Second
+	}
+	if c.DispatchTimeout <= 0 {
+		c.DispatchTimeout = 5 * time.Second
 	}
 	return c
 }
@@ -48,8 +52,11 @@ type Relay struct {
 type relayRepository interface {
 	ListDispatchable(ctx context.Context, limit int) ([]Event, error)
 	CountPending(ctx context.Context) (int64, error)
+	TryMarkDispatching(ctx context.Context, eventID int64) (bool, error)
 	MarkPublished(ctx context.Context, eventID int64) error
 	MarkRetry(ctx context.Context, eventID int64, delay time.Duration, lastErr string) error
+	MarkSuspended(ctx context.Context, eventID int64, lastErr string) error
+	RecoverStaleDispatching(ctx context.Context, staleBefore time.Time, limit int) (int64, error)
 }
 
 type relayMetrics interface {
@@ -118,6 +125,9 @@ func (r *Relay) run(ctx context.Context) {
 		if cnt, err := r.repo.CountPending(ctx); err == nil {
 			r.metrics.SetOutboxPending(float64(cnt))
 		}
+		if recovered, err := r.repo.RecoverStaleDispatching(ctx, time.Now().UTC().Add(-r.cfg.DispatchTimeout), r.cfg.BatchSize); err == nil && recovered > 0 {
+			applog.L(ctx).Info("recovered stale dispatching outbox events", zap.Int64("count", recovered))
+		}
 		if err := r.dispatchOnce(ctx); err != nil {
 			applog.L(ctx).Error("outbox relay dispatch failed", zap.Error(err))
 		}
@@ -135,13 +145,20 @@ func (r *Relay) dispatchOnce(ctx context.Context) error {
 		return err
 	}
 	for _, evt := range events {
+		ok, markErr := r.repo.TryMarkDispatching(ctx, evt.ID)
+		if markErr != nil {
+			return markErr
+		}
+		if !ok {
+			continue
+		}
 		payload, parseErr := ParseTaskCreatedPayload(evt.PayloadJSON)
 		if parseErr != nil {
-			_ = r.repo.MarkRetry(ctx, evt.ID, relayBackoff(evt.RetryCount, r.cfg.BackoffBase), parseErr.Error())
+			_ = r.repo.MarkSuspended(ctx, evt.ID, "invalid outbox payload: "+parseErr.Error())
 			continue
 		}
 		if payload.TaskID <= 0 {
-			_ = r.repo.MarkRetry(ctx, evt.ID, relayBackoff(evt.RetryCount, r.cfg.BackoffBase), "invalid task_id in outbox payload")
+			_ = r.repo.MarkSuspended(ctx, evt.ID, "invalid task_id in outbox payload")
 			continue
 		}
 		if pubErr := r.publisher.PublishReady(ctx, payload.TaskID); pubErr != nil {
@@ -149,7 +166,11 @@ func (r *Relay) dispatchOnce(ctx context.Context) error {
 			continue
 		}
 		if markErr := r.repo.MarkPublished(ctx, evt.ID); markErr != nil {
-			_ = r.repo.MarkRetry(ctx, evt.ID, relayBackoff(evt.RetryCount, r.cfg.BackoffBase), markErr.Error())
+			applog.L(ctx).Warn("mark outbox event published failed after publish; rely on stale-dispatch recovery",
+				zap.Int64("event_id", evt.ID),
+				zap.Int64("task_id", payload.TaskID),
+				zap.Error(markErr),
+			)
 		}
 	}
 	return nil

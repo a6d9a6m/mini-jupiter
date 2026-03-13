@@ -6,11 +6,12 @@ import (
 )
 
 const (
-	StatusPending = "PENDING"
-	StatusRunning = "RUNNING"
-	StatusSuccess = "SUCCESS"
-	StatusFailed  = "FAILED"
-	StatusDead    = "DEAD"
+	StatusPending   = "PENDING"
+	StatusRunning   = "RUNNING"
+	StatusSuccess   = "SUCCESS"
+	StatusFailed    = "FAILED"
+	StatusSuspended = "SUSPENDED"
+	StatusDead      = "DEAD"
 )
 
 const (

@@ -28,6 +28,8 @@ import (
 const (
 	testTaskMySQLDSNEnv  = "QUAN_TEST_MYSQL_DSN"
 	testTaskRedisAddrEnv = "QUAN_TEST_REDIS_ADDR"
+	defaultTaskMySQLDSN  = "root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4"
+	defaultTaskRedisAddr = "127.0.0.1:6379"
 )
 
 func TestE2E_TaskPipeline_RetryThenSuccess_NoSilentLoss(t *testing.T) {
@@ -348,10 +350,7 @@ func redisDLQLen(t *testing.T, q *Queue) int64 {
 
 func openTaskIntegrationDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := strings.TrimSpace(os.Getenv(testTaskMySQLDSNEnv))
-	if dsn == "" {
-		t.Skipf("skip e2e test: %s is not set", testTaskMySQLDSNEnv)
-	}
+	dsn, fromEnv := resolveTaskMySQLDSN()
 	ensureTaskDatabaseExists(t, dsn)
 
 	db, err := sql.Open("mysql", dsn)
@@ -366,6 +365,9 @@ func openTaskIntegrationDB(t *testing.T) *sql.DB {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
+		if !fromEnv {
+			t.Skipf("skip e2e test: %s is not set and docker default mysql is unavailable: %v", testTaskMySQLDSNEnv, err)
+		}
 		t.Fatalf("ping mysql failed: %v", err)
 	}
 
@@ -395,10 +397,7 @@ func openTaskIntegrationDB(t *testing.T) *sql.DB {
 
 func openTaskIntegrationRedis(t *testing.T) *redis.Client {
 	t.Helper()
-	addr := strings.TrimSpace(os.Getenv(testTaskRedisAddrEnv))
-	if addr == "" {
-		t.Skipf("skip e2e test: %s is not set", testTaskRedisAddrEnv)
-	}
+	addr, fromEnv := resolveTaskRedisAddr()
 	client, err := redis.NewClient(redis.Config{
 		Addr:        addr,
 		DB:          0,
@@ -409,12 +408,31 @@ func openTaskIntegrationRedis(t *testing.T) *redis.Client {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 	if err := client.Ping(context.Background()); err != nil {
+		if !fromEnv {
+			t.Skipf("skip e2e test: %s is not set and docker default redis is unavailable: %v", testTaskRedisAddrEnv, err)
+		}
 		t.Fatalf("ping redis failed: %v", err)
 	}
 	if err := client.Raw().FlushDB(context.Background()).Err(); err != nil {
 		t.Fatalf("flush redis failed: %v", err)
 	}
 	return client
+}
+
+func resolveTaskMySQLDSN() (string, bool) {
+	dsn := strings.TrimSpace(os.Getenv(testTaskMySQLDSNEnv))
+	if dsn != "" {
+		return dsn, true
+	}
+	return defaultTaskMySQLDSN, false
+}
+
+func resolveTaskRedisAddr() (string, bool) {
+	addr := strings.TrimSpace(os.Getenv(testTaskRedisAddrEnv))
+	if addr != "" {
+		return addr, true
+	}
+	return defaultTaskRedisAddr, false
 }
 
 func ensureTaskDatabaseExists(t *testing.T, dsn string) {

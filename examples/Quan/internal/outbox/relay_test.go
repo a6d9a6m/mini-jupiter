@@ -12,13 +12,19 @@ type fakeRelayRepo struct {
 	events  []Event
 	listErr error
 
-	markPublishedErr error
-	markRetryErr     error
+	tryMarkDispatchingErr bool
+	markPublishedErr      error
+	markRetryErr          error
+	markSuspendedErr      error
+	recoverErr            error
 
 	mu               sync.Mutex
 	listCalls        int
+	tryDispatchIDs   []int64
 	markPublishedIDs []int64
 	markRetryIDs     []int64
+	markSuspendedIDs []int64
+	recoverCalls     int
 }
 
 func (f *fakeRelayRepo) ListDispatchable(_ context.Context, _ int) ([]Event, error) {
@@ -39,6 +45,16 @@ func (f *fakeRelayRepo) CountPending(_ context.Context) (int64, error) {
 	return int64(len(f.events)), nil
 }
 
+func (f *fakeRelayRepo) TryMarkDispatching(_ context.Context, eventID int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tryDispatchIDs = append(f.tryDispatchIDs, eventID)
+	if f.tryMarkDispatchingErr {
+		return false, errors.New("mark dispatching failed")
+	}
+	return true, nil
+}
+
 func (f *fakeRelayRepo) MarkPublished(_ context.Context, eventID int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -51,6 +67,23 @@ func (f *fakeRelayRepo) MarkRetry(_ context.Context, eventID int64, _ time.Durat
 	defer f.mu.Unlock()
 	f.markRetryIDs = append(f.markRetryIDs, eventID)
 	return f.markRetryErr
+}
+
+func (f *fakeRelayRepo) MarkSuspended(_ context.Context, eventID int64, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.markSuspendedIDs = append(f.markSuspendedIDs, eventID)
+	return f.markSuspendedErr
+}
+
+func (f *fakeRelayRepo) RecoverStaleDispatching(_ context.Context, _ time.Time, _ int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recoverCalls++
+	if f.recoverErr != nil {
+		return 0, f.recoverErr
+	}
+	return 0, nil
 }
 
 type fakePublisher struct {
@@ -89,15 +122,18 @@ func TestRelayDispatchSuccessMarksPublished(t *testing.T) {
 	if len(pub.published) != 1 || pub.published[0] != 123 {
 		t.Fatalf("expected published task 123, got %+v", pub.published)
 	}
+	if len(repo.tryDispatchIDs) != 1 || repo.tryDispatchIDs[0] != 1 {
+		t.Fatalf("expected dispatch attempt for event 1, got %+v", repo.tryDispatchIDs)
+	}
 	if len(repo.markPublishedIDs) != 1 || repo.markPublishedIDs[0] != 1 {
 		t.Fatalf("expected mark published event 1, got %+v", repo.markPublishedIDs)
 	}
-	if len(repo.markRetryIDs) != 0 {
-		t.Fatalf("expected no retry mark, got %+v", repo.markRetryIDs)
+	if len(repo.markRetryIDs) != 0 || len(repo.markSuspendedIDs) != 0 {
+		t.Fatalf("expected no retry or suspend mark, got retry=%+v suspended=%+v", repo.markRetryIDs, repo.markSuspendedIDs)
 	}
 }
 
-func TestRelayDispatchInvalidPayloadMarksRetry(t *testing.T) {
+func TestRelayDispatchInvalidPayloadMarksSuspended(t *testing.T) {
 	repo := &fakeRelayRepo{
 		events: []Event{
 			{
@@ -119,8 +155,11 @@ func TestRelayDispatchInvalidPayloadMarksRetry(t *testing.T) {
 	if len(pub.published) != 0 {
 		t.Fatalf("expected no publish, got %+v", pub.published)
 	}
-	if len(repo.markRetryIDs) != 1 || repo.markRetryIDs[0] != 2 {
-		t.Fatalf("expected retry mark event 2, got %+v", repo.markRetryIDs)
+	if len(repo.markRetryIDs) != 0 {
+		t.Fatalf("expected no retry mark, got %+v", repo.markRetryIDs)
+	}
+	if len(repo.markSuspendedIDs) != 1 || repo.markSuspendedIDs[0] != 2 {
+		t.Fatalf("expected suspended mark event 2, got %+v", repo.markSuspendedIDs)
 	}
 }
 
@@ -154,7 +193,7 @@ func TestRelayDispatchPublisherFailureMarksRetry(t *testing.T) {
 	}
 }
 
-func TestRelayDispatchMarkPublishedFailureFallsBackRetry(t *testing.T) {
+func TestRelayDispatchMarkPublishedFailureLeavesDispatchingForRecovery(t *testing.T) {
 	repo := &fakeRelayRepo{
 		events: []Event{
 			{
@@ -180,7 +219,34 @@ func TestRelayDispatchMarkPublishedFailureFallsBackRetry(t *testing.T) {
 	if len(repo.markPublishedIDs) != 1 || repo.markPublishedIDs[0] != 4 {
 		t.Fatalf("expected mark published event 4, got %+v", repo.markPublishedIDs)
 	}
-	if len(repo.markRetryIDs) != 1 || repo.markRetryIDs[0] != 4 {
-		t.Fatalf("expected fallback retry mark event 4, got %+v", repo.markRetryIDs)
+	if len(repo.markRetryIDs) != 0 {
+		t.Fatalf("expected no retry mark after publish success, got %+v", repo.markRetryIDs)
+	}
+}
+
+func TestRelayRunRecoversStaleDispatching(t *testing.T) {
+	repo := &fakeRelayRepo{}
+	pub := &fakePublisher{}
+	relay, err := NewRelay(repo, pub, RelayConfig{
+		Enabled:         true,
+		PollInterval:    5 * time.Millisecond,
+		DispatchTimeout: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new relay failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		relay.run(ctx)
+		close(done)
+	}()
+	time.Sleep(15 * time.Millisecond)
+	cancel()
+	<-done
+
+	if repo.recoverCalls == 0 {
+		t.Fatalf("expected stale dispatching recovery to be called")
 	}
 }

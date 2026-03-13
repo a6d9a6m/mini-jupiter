@@ -85,11 +85,27 @@ func (r *Repository) CountPending(ctx context.Context) (int64, error) {
 	if err := r.db.QueryRowContext(ctx, `
 SELECT COUNT(1)
 FROM outbox_events
-WHERE status = ?
-`, StatusPending).Scan(&cnt); err != nil {
+WHERE status IN (?, ?, ?)
+`, StatusPending, StatusDispatching, StatusSuspended).Scan(&cnt); err != nil {
 		return 0, fmt.Errorf("count pending outbox events: %w", err)
 	}
 	return cnt, nil
+}
+
+func (r *Repository) TryMarkDispatching(ctx context.Context, eventID int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+UPDATE outbox_events
+SET status = ?, last_error = '', updated_at = ?
+WHERE event_id = ? AND status = ?
+`, StatusDispatching, time.Now().UTC(), eventID, StatusPending)
+	if err != nil {
+		return false, fmt.Errorf("mark outbox event dispatching: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("mark outbox event dispatching rows affected: %w", err)
+	}
+	return affected > 0, nil
 }
 
 func (r *Repository) MarkPublished(ctx context.Context, eventID int64) error {
@@ -97,7 +113,7 @@ func (r *Repository) MarkPublished(ctx context.Context, eventID int64) error {
 UPDATE outbox_events
 SET status = ?, last_error = '', updated_at = ?
 WHERE event_id = ? AND status = ?
-`, StatusPublished, time.Now().UTC(), eventID, StatusPending)
+`, StatusPublished, time.Now().UTC(), eventID, StatusDispatching)
 	if err != nil {
 		return fmt.Errorf("mark outbox event published: %w", err)
 	}
@@ -108,13 +124,53 @@ func (r *Repository) MarkRetry(ctx context.Context, eventID int64, delay time.Du
 	next := time.Now().UTC().Add(delay)
 	_, err := r.db.ExecContext(ctx, `
 UPDATE outbox_events
-SET retry_count = retry_count + 1, next_retry_at = ?, last_error = ?, updated_at = ?
+SET status = ?, retry_count = retry_count + 1, next_retry_at = ?, last_error = ?, updated_at = ?
 WHERE event_id = ? AND status = ?
-`, next, truncate(lastErr, 255), time.Now().UTC(), eventID, StatusPending)
+`, StatusPending, next, truncate(lastErr, 255), time.Now().UTC(), eventID, StatusDispatching)
 	if err != nil {
 		return fmt.Errorf("mark outbox event retry: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) MarkSuspended(ctx context.Context, eventID int64, lastErr string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE outbox_events
+SET status = ?, last_error = ?, updated_at = ?
+WHERE event_id = ? AND status IN (?, ?)
+`, StatusSuspended, truncate(lastErr, 255), time.Now().UTC(), eventID, StatusPending, StatusDispatching)
+	if err != nil {
+		return fmt.Errorf("mark outbox event suspended: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) RecoverStaleDispatching(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	res, err := r.db.ExecContext(ctx, `
+UPDATE outbox_events
+SET status = ?, last_error = ?, updated_at = ?
+WHERE event_id IN (
+	SELECT event_id
+	FROM (
+		SELECT event_id
+		FROM outbox_events
+		WHERE status = ? AND updated_at <= ?
+		ORDER BY updated_at ASC
+		LIMIT ?
+	) AS stale_events
+)
+`, StatusPending, "dispatch timeout recovered for retry", time.Now().UTC(), StatusDispatching, staleBefore, limit)
+	if err != nil {
+		return 0, fmt.Errorf("recover stale dispatching outbox events: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("recover stale dispatching outbox rows affected: %w", err)
+	}
+	return affected, nil
 }
 
 func truncate(s string, n int) string {

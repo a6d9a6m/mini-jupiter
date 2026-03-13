@@ -58,6 +58,7 @@ type consumerRepository interface {
 	TryMarkRunning(ctx context.Context, taskID int64) (AsyncTask, bool, error)
 	MarkFailed(ctx context.Context, taskID int64, lastErr string, backoffBase time.Duration) (bool, *time.Time, error)
 	MarkSuccess(ctx context.Context, taskID int64) error
+	MarkSuspended(ctx context.Context, taskID int64, lastErr string) error
 }
 
 type consumerQueue interface {
@@ -222,6 +223,10 @@ func (c *Consumer) consumeTask(ctx context.Context, taskID int64, workerID int) 
 	}
 
 	if err := c.repo.MarkSuccess(ctx, task.ID); err != nil {
+		suspendErr := c.repo.MarkSuspended(ctx, task.ID, "handler succeeded but mark success failed: "+err.Error())
+		if suspendErr != nil {
+			return fmt.Errorf("mark task success failed: %w; suspend fallback failed: %v", err, suspendErr)
+		}
 		return err
 	}
 	c.metrics.IncConsumeSuccess()

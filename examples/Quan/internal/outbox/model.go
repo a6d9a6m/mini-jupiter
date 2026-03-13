@@ -3,8 +3,10 @@ package outbox
 import "encoding/json"
 
 const (
-	StatusPending   = "PENDING"
-	StatusPublished = "PUBLISHED"
+	StatusPending     = "PENDING"
+	StatusDispatching = "DISPATCHING"
+	StatusPublished   = "PUBLISHED"
+	StatusSuspended   = "SUSPENDED"
 
 	EventTypeTaskCreated = "TASK_CREATED"
 )

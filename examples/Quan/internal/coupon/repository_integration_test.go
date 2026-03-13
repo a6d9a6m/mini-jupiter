@@ -20,6 +20,7 @@ import (
 )
 
 const testMySQLDSNEnv = "QUAN_TEST_MYSQL_DSN"
+const defaultTestMySQLDSN = "root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4"
 
 var testCouponIDSeed int64 = 900000
 
@@ -458,10 +459,7 @@ func TestRepository_ConcurrentStockAndLimitMixedNoOverflow(t *testing.T) {
 
 func openIntegrationDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := strings.TrimSpace(os.Getenv(testMySQLDSNEnv))
-	if dsn == "" {
-		t.Skipf("skip integration test: %s is not set", testMySQLDSNEnv)
-	}
+	dsn, fromEnv := resolveTestMySQLDSN()
 	ensureDatabaseExists(t, dsn)
 
 	db, err := sql.Open("mysql", dsn)
@@ -476,6 +474,9 @@ func openIntegrationDB(t *testing.T) *sql.DB {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
+		if !fromEnv {
+			t.Skipf("skip integration test: %s is not set and docker default mysql is unavailable: %v", testMySQLDSNEnv, err)
+		}
 		t.Fatalf("ping mysql failed: %v", err)
 	}
 
@@ -494,6 +495,14 @@ func openIntegrationDB(t *testing.T) *sql.DB {
 		t.Fatalf("run migrations failed: %v", err)
 	}
 	return db
+}
+
+func resolveTestMySQLDSN() (string, bool) {
+	dsn := strings.TrimSpace(os.Getenv(testMySQLDSNEnv))
+	if dsn != "" {
+		return dsn, true
+	}
+	return defaultTestMySQLDSN, false
 }
 
 func ensureDatabaseExists(t *testing.T, dsn string) {

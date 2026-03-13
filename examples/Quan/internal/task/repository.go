@@ -137,6 +137,18 @@ WHERE task_id = ? AND status = ?
 	return nil
 }
 
+func (r *Repository) MarkSuspended(ctx context.Context, taskID int64, lastErr string) error {
+	_, err := r.db.ExecContext(ctx, `
+UPDATE async_tasks
+SET status = ?, last_error = ?, next_retry_at = NULL, updated_at = ?
+WHERE task_id = ? AND status = ?
+`, StatusSuspended, truncate(lastErr, 255), time.Now().UTC(), taskID, StatusRunning)
+	if err != nil {
+		return fmt.Errorf("mark task suspended: %w", err)
+	}
+	return nil
+}
+
 func (r *Repository) MarkReplayReady(ctx context.Context, taskID int64) error {
 	res, err := r.db.ExecContext(ctx, `
 UPDATE async_tasks
@@ -265,6 +277,83 @@ LIMIT ?
 		return nil, fmt.Errorf("iterate due failed tasks: %w", err)
 	}
 	return result, nil
+}
+
+func (r *Repository) ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT task_id
+FROM async_tasks
+WHERE status = ? AND updated_at <= ?
+ORDER BY updated_at ASC
+LIMIT ?
+`, StatusSuspended, staleBefore, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list suspended tasks for compensation: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]int64, 0, limit)
+	for rows.Next() {
+		var taskID int64
+		if scanErr := rows.Scan(&taskID); scanErr != nil {
+			return nil, fmt.Errorf("scan suspended task id: %w", scanErr)
+		}
+		result = append(result, taskID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate suspended tasks: %w", err)
+	}
+	return result, nil
+}
+
+func (r *Repository) ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT task_id
+FROM async_tasks
+WHERE status = ? AND updated_at <= ?
+ORDER BY updated_at ASC
+LIMIT ?
+`, StatusRunning, staleBefore, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list stale running tasks for compensation: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]int64, 0, limit)
+	for rows.Next() {
+		var taskID int64
+		if scanErr := rows.Scan(&taskID); scanErr != nil {
+			return nil, fmt.Errorf("scan stale running task id: %w", scanErr)
+		}
+		result = append(result, taskID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate stale running tasks: %w", err)
+	}
+	return result, nil
+}
+
+func (r *Repository) MarkRecoveredForRetry(ctx context.Context, taskID int64, lastErr string) (bool, error) {
+	now := time.Now().UTC()
+	res, err := r.db.ExecContext(ctx, `
+UPDATE async_tasks
+SET status = ?, next_retry_at = ?, last_error = ?, updated_at = ?
+WHERE task_id = ? AND status IN (?, ?)
+`, StatusFailed, now, truncate(lastErr, 255), now, taskID, StatusRunning, StatusSuspended)
+	if err != nil {
+		return false, fmt.Errorf("mark task recovered for retry: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("mark task recovered for retry rows affected: %w", err)
+	}
+	return affected > 0, nil
 }
 
 type taskRow interface {

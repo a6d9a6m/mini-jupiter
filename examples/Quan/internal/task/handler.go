@@ -11,6 +11,9 @@ import (
 )
 
 type TaskHandler interface {
+	// Handle must be idempotent because the delivery contract is at-least-once.
+	// A task may be replayed after publish ambiguity, stale RUNNING recovery,
+	// suspended-state recovery, or manual DLQ replay.
 	Handle(ctx context.Context, task AsyncTask) error
 }
 

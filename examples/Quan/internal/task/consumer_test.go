@@ -18,11 +18,13 @@ type fakeConsumerRepo struct {
 	markFailedErr  error
 
 	markSuccessErr error
+	markSuspendErr error
 
 	mu              sync.Mutex
 	tryCalls        int
 	markFailedCalls int
 	markSuccessIDs  []int64
+	markSuspendIDs  []int64
 }
 
 func (f *fakeConsumerRepo) TryMarkRunning(_ context.Context, taskID int64) (AsyncTask, bool, error) {
@@ -50,6 +52,13 @@ func (f *fakeConsumerRepo) MarkSuccess(_ context.Context, taskID int64) error {
 	defer f.mu.Unlock()
 	f.markSuccessIDs = append(f.markSuccessIDs, taskID)
 	return f.markSuccessErr
+}
+
+func (f *fakeConsumerRepo) MarkSuspended(_ context.Context, taskID int64, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.markSuspendIDs = append(f.markSuspendIDs, taskID)
+	return f.markSuspendErr
 }
 
 type fakeConsumerQueue struct {
@@ -231,5 +240,31 @@ func TestRetrySchedulerCallsMoveDueRetryToReady(t *testing.T) {
 
 	if queue.moveCalls == 0 {
 		t.Fatalf("expected retry scheduler to call MoveDueRetryToReady")
+	}
+}
+
+func TestConsumeTaskSuccessMarkSuccessFailureSuspendsTask(t *testing.T) {
+	repo := &fakeConsumerRepo{
+		tryTask:        AsyncTask{ID: 505, TaskType: TaskTypeSendCouponNotice},
+		tryOK:          true,
+		markSuccessErr: errors.New("db write failed"),
+	}
+	queue := &fakeConsumerQueue{}
+	registry := NewHandlerRegistry()
+	registry.Register(TaskTypeSendCouponNotice, &fakeHandler{})
+
+	c, err := NewConsumer(repo, queue, registry, ConsumeConfig{Enabled: true})
+	if err != nil {
+		t.Fatalf("new consumer failed: %v", err)
+	}
+
+	if err := c.consumeTask(context.Background(), 505, 1); err == nil {
+		t.Fatalf("expected consume task error when mark success fails")
+	}
+	if len(repo.markSuccessIDs) != 1 || repo.markSuccessIDs[0] != 505 {
+		t.Fatalf("expected mark success once for task 505, got %+v", repo.markSuccessIDs)
+	}
+	if len(repo.markSuspendIDs) != 1 || repo.markSuspendIDs[0] != 505 {
+		t.Fatalf("expected mark suspended once for task 505, got %+v", repo.markSuspendIDs)
 	}
 }
