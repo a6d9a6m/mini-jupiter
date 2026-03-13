@@ -1,5 +1,44 @@
 # Benchmark Methodology
 
+Quan now has two benchmark lanes:
+
+- scenario benchmarks driven by `examples/Quan/bench/cmd/benchclaim`
+- capacity scans driven by Dockerized `vegeta`
+
+Use the first lane when you want replay/conflict behavior evidence. Use the
+second lane when you want to find the first failing concurrency level on the
+steady-success claim path.
+
+## Capacity Scan
+
+Script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-capacity.ps1 `
+  -ConcurrencyLevels 100,200,400,800 `
+  -RequestsPerStep 20000 `
+  -DurationSeconds 10 `
+  -StopOnFirstFailure
+```
+
+Method:
+
+- every step provisions a fresh coupon campaign with `stock = unique request pool`
+- traffic uses unique users and unique idempotency keys, so every request is
+  expected to succeed with `200`
+- `vegeta` runs from Docker against the real HTTP endpoint with a fixed worker
+  cap equal to the step concurrency, `rate=0`, and a fixed duration
+- each step finishes with a ledger audit to verify no oversell, no per-user
+  overflow, and no stock drift
+- the summary also verifies that observed requests do not exceed the unique
+  request pool, so the scan does not silently wrap and replay old targets
+
+Failure rule:
+
+- any non-`200` response
+- any transport error
+- any ledger audit failure
+
 ## Date
 
 2026-03-13
@@ -64,6 +103,24 @@ go test ./examples/Quan/internal/task -run TestE2E_FaultInjection_ShortRedisOuta
 
 ## Commands Used
 
+Preferred runner:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-bench.ps1 `
+  -Scenario <scenario> -CouponId <coupon_id> -Stock <stock> -PerUserLimit <limit> `
+  -Requests <requests> -Concurrency <concurrency> -UserMode <user_mode> `
+  -UserPool <user_pool> -StartUserId <start_user_id> -IdemMode <idem_mode> `
+  -IdemPrefix <idem_prefix>
+```
+
+The script handles:
+
+- stale process cleanup on `:8081`
+- app startup and `/ping` probe
+- `benchprep`
+- `benchclaim`
+- process teardown in `finally`
+
 ### Baseline
 
 ```powershell
@@ -99,3 +156,5 @@ go run ./examples/Quan/bench/cmd/benchclaim `
 - These numbers are single-host local results, not capacity limits.
 - They are suitable for comparing traffic shapes and identifying bottlenecks.
 - They are not suitable for claiming production throughput or internet-scale capacity.
+- Always use the lifecycle-managed script instead of leaving a benchmark server
+  running in the background.

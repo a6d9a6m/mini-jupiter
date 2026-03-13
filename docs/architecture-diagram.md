@@ -6,8 +6,9 @@ flowchart LR
     HTTP[Quan HTTP API]
     MW[Middleware<br/>TraceID / Logging / Recovery]
     Coupon[Coupon Service]
+    Decision[Redis Claim Adjudicator]
     MySQL[(MySQL<br/>coupon_claims<br/>async_tasks<br/>outbox_events)]
-    Redis[(Redis<br/>ready / retry / dlq)]
+    Redis[(Redis<br/>claim stock / user counts / idem<br/>ready / retry / dlq)]
     Relay[Outbox Relay]
     Consumer[Task Consumer]
     Compensator[Task Compensator]
@@ -16,7 +17,8 @@ flowchart LR
     Grafana[Grafana Dashboard]
 
     Client --> HTTP --> MW --> Coupon
-    Coupon --> MySQL
+    Coupon --> Decision
+    Decision --> Redis
     Coupon -->|task + outbox commit| MySQL
     Relay -->|scan dispatchable events| MySQL
     Relay -->|publish ready| Redis
@@ -35,6 +37,7 @@ flowchart LR
 ## Notes
 
 - correctness boundary: MySQL committed state
+- hot-path adjudication: Redis claim decision keys
 - hot async transport: Redis queue keys
 - reliability mechanisms: outbox relay + task consumer + compensator
 - observability path: HTTP metrics + business metrics + async recovery metrics

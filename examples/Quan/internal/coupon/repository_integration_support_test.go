@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"mini-jupiter/pkg/mysql"
+	"mini-jupiter/pkg/redis"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
@@ -168,4 +169,33 @@ WHERE coupon_id = ?
 		t.Fatalf("query campaign stock failed: %v", err)
 	}
 	return stock
+}
+
+func openIntegrationRedis(t *testing.T) *redis.Client {
+	t.Helper()
+	addr := strings.TrimSpace(os.Getenv(testRedisAddrEnv))
+	fromEnv := true
+	if addr == "" {
+		addr = defaultTestRedisAddr
+		fromEnv = false
+	}
+	client, err := redis.NewClient(redis.Config{
+		Addr:        addr,
+		DB:          0,
+		DialTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new redis client failed: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.Ping(context.Background()); err != nil {
+		if !fromEnv {
+			t.Skipf("skip integration test: %s is not set and docker default redis is unavailable: %v", testRedisAddrEnv, err)
+		}
+		t.Fatalf("ping redis failed: %v", err)
+	}
+	if err := client.Raw().FlushDB(context.Background()).Err(); err != nil {
+		t.Fatalf("flush redis failed: %v", err)
+	}
+	return client
 }

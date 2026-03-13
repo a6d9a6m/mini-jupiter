@@ -9,6 +9,7 @@ import (
 )
 
 type campaignSnapshot struct {
+	CouponID       int64
 	Status         string
 	AvailableStock int
 	PerUserLimit   int
@@ -49,6 +50,25 @@ FOR UPDATE
 		}
 		return campaignSnapshot{}, fmt.Errorf("query campaign for update: %w", err)
 	}
+	campaign.CouponID = couponID
+	return campaign, nil
+}
+
+func (r *Repository) LoadCampaign(ctx context.Context, couponID int64) (campaignSnapshot, error) {
+	var campaign campaignSnapshot
+	err := r.db.QueryRowContext(ctx, `
+SELECT status, available_stock, per_user_limit, start_at, end_at
+FROM coupon_campaigns
+WHERE coupon_id = ?
+LIMIT 1
+`, couponID).Scan(&campaign.Status, &campaign.AvailableStock, &campaign.PerUserLimit, &campaign.StartAt, &campaign.EndAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return campaignSnapshot{}, ErrCampaignNotFound
+		}
+		return campaignSnapshot{}, fmt.Errorf("query campaign: %w", err)
+	}
+	campaign.CouponID = couponID
 	return campaign, nil
 }
 

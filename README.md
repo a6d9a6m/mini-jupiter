@@ -1,100 +1,144 @@
 # mini-jupiter
 
-轻量级 Go 后端基础框架学习项目，参考 Jupiter 的设计思路，目标是把配置、日志、中间件、错误处理、生命周期、可观测性、并发治理等“工程化基础能力”做成可复用模块。
+`mini-jupiter` is a Go backend practice project built around reusable runtime
+components and a hardened Quan coupon-claim demo.
 
-## 特性
-- 配置管理：文件 + 环境变量覆盖 + 热更新
-- 日志系统：结构化日志 + trace_id 注入
-- 中间件体系：Recovery / Logging / TraceID / RateLimit / Isolation
-- 统一错误：业务错误码 + HTTP 映射 + JSON 响应
-- 生命周期：组件化启动/停止 + 优雅退出
-- 可观测性：Prometheus 指标 + Grafana 仪表盘
-- 并发治理：Worker Pool + 路由级并发隔离（并发/排队/超时）
+The project now focuses on four system-level claims:
 
-## 目录结构
-```
-mini-jupiter/
-├─ examples/
-│  └─ http-server/            # 示例服务
-├─ internal/
-│  └─ middleware/             # 中间件链（接入层）
-├─ pkg/
-│  ├─ config/                 # 配置管理
-│  ├─ log/                    # 日志封装
-│  ├─ errors/                 # 错误体系
-│  ├─ runtime/                # 生命周期管理
-│  ├─ metric/                 # Prometheus 指标
-│  ├─ pool/                   # Worker Pool
-│  ├─ ratelimiter/            # 令牌桶限流
-│  └─ isolation/              # 并发隔离（核心逻辑）
-├─ grafana/                   # Grafana provision + dashboard
-├─ bench/                     # 压测脚本与结果
-├─ docker-compose.yml         # Prometheus + Grafana
-└─ prometheus.yml             # Prometheus 抓取配置（可选）
-```
+- MySQL is the auditable ledger for claim correctness.
+- Redis provides the coupon-claim hot-path adjudication.
+- Outbox and compensator turn async gray failures into recoverable state.
+- Reliability and performance claims are backed by tests, fault injection, and
+  scenario-based benchmark evidence.
 
-## 快速开始
-```bash
-go run ./examples/http-server
-```
-访问：
-- `GET /ping`（正常）
-- `GET /api/users`（业务错误）
-- `GET /panic`（panic 触发 Recovery）
-- `GET /slow`（慢请求）
-- `POST /jobs`（异步任务）
-- `GET /metrics`（指标）
+## Main Areas
 
-## 配置说明
-示例配置：`examples/http-server/config.yaml`
-- `app`：应用信息
-- `http.addr`：监听地址
-- `log`：日志级别与格式
-- `middleware`：中间件开关（Recovery/Trace/Logging）
-- `metric`：指标开关与路径
-- `ratelimit`：限流参数
-- `isolation`：并发隔离（每路由并发/排队/超时）
+- `examples/Quan`
+  Reliability-focused coupon-claim service used as the primary validation
+  scenario.
+- `pkg/`
+  Reusable runtime building blocks such as config, logging, errors, metrics,
+  MySQL, Redis, and lifecycle management.
+- `internal/middleware`
+  Request middleware for trace ID, recovery, and logging.
+- `docs/`
+  Correctness, async reliability, benchmark, and observability write-ups.
 
-## 可观测闭环（Prometheus + Grafana）
-已补齐以下指标：
-- HTTP duration histogram（P95/P99）
-- inflight gauge
-- error counter（按 code）
+## Quan Quick Start
 
-错误响应会携带 `trace_id`，便于从接口响应定位到对应日志。
+Start infrastructure:
 
-快速启动（Docker Desktop）：
-```bash
-docker compose up -d
-```
-访问：
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000`（admin/admin）
-
-Grafana 已自动 provision：
-- 数据源：Prometheus
-- Dashboard：`Mini-Jupiter Overview`
-
-说明：项目为学习用途，不考虑线上采样与性能开销的极致优化，仅用于展示“能定位问题”的闭环能力。
-
-## 性能基线压测（hey）
-基线配置：`examples/http-server/config.baseline.yaml`（关闭中间件/指标/限流）
-
-安装 hey：
-```bash
-go install github.com/rakyll/hey@latest
-```
-
-运行基线压测：
-- Windows：
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\bench\run.ps1
+docker compose up -d mysql redis prometheus grafana
 ```
-- Linux/macOS（有 make 时）：
-```bash
-make bench
-```
-输出结果：`bench/results/baseline_*.txt`
 
-## 许可证
-MIT License. See `LICENSE`.
+Run Quan:
+
+```powershell
+$env:CONFIG_PATH="examples/Quan/config.sample.yaml"
+go run ./examples/Quan
+```
+
+Useful endpoints:
+
+- `GET /ping`
+- `POST /api/v1/coupons/{coupon_id}/claim`
+- `GET /api/v1/coupons/{coupon_id}/claims/me`
+- `GET /metrics`
+
+## Test Commands
+
+Targeted reliability checks:
+
+```powershell
+go test ./examples/Quan/internal/coupon -run "Test(Repository_|Service_)" -v
+go test ./examples/Quan/internal/task -run "Test(E2E_|ConsumeTask|Compensator_)" -v
+go test ./examples/Quan/internal/outbox -run TestRelay -v
+```
+
+Full project regression:
+
+```powershell
+go test ./...
+```
+
+## Benchmark Lifecycle Scripts
+
+Two PowerShell scripts are provided to avoid stale Quan benchmark processes:
+
+- `scripts/quan-stop.ps1`
+  Stops a benchmark-owned Quan process by PID file and can optionally clear the
+  owner of `:8081`.
+- `scripts/quan-run-bench.ps1`
+  Cleans up old Quan processes, starts the app, waits for `/ping`, runs
+  `benchprep`, runs `benchclaim`, and always tears the app down in `finally`.
+
+Purpose-specific verification scripts:
+
+- `scripts/quan-run-high-conflict.ps1`
+  Runs the high-conflict benchmark and then audits the ledger for oversell,
+  per-user overflow, and benchmark-vs-ledger consistency.
+- `scripts/quan-run-capacity.ps1`
+  Uses Dockerized `vegeta` to run a steady-success concurrency sweep against the
+  real claim endpoint and finds the first failing concurrency level.
+- `scripts/quan-audit-ledger.ps1`
+  Audits a coupon campaign directly from MySQL and optionally cross-checks a
+  benchmark report.
+- `scripts/quan-run-fault-recovery.ps1`
+  Executes the deterministic fault-injection recovery suite and writes a JSON
+  summary.
+
+Example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-bench.ps1 `
+  -Scenario idempotent_replay `
+  -CouponId 9601 `
+  -Stock 800 `
+  -PerUserLimit 1 `
+  -Requests 4000 `
+  -Concurrency 20 `
+  -UserMode cycle `
+  -UserPool 800 `
+  -StartUserId 930000 `
+  -IdemMode per_user `
+  -IdemPrefix replay_check
+```
+
+Capacity sweep example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-capacity.ps1 `
+  -ConcurrencyLevels 100,200,400,800 `
+  -RequestsPerStep 20000 `
+  -DurationSeconds 10 `
+  -StopOnFirstFailure
+```
+
+The benchmark and recovery scripts assume local MySQL/Redis are already
+reachable. If you want the script to try `docker compose up -d mysql redis`
+first, pass `-StartDockerInfra`.
+
+Run the high-conflict benchmark and fault-recovery scripts serially. They share
+the same local MySQL, Redis, and `:8081` service port.
+The capacity sweep script also uses the same local service port and should run
+serially.
+
+## Key Docs
+
+- [Correctness Model](docs/correctness-model.md)
+- [Async Reliability State Machine](docs/async-reliability-state-machine.md)
+- [Fault Injection Matrix](docs/fault-injection-matrix.md)
+- [Observability](docs/observability.md)
+- [Benchmark Methodology](docs/benchmark-methodology.md)
+- [Verification Scripts](docs/verification-scripts.md)
+- [Redis Hot-Path Adjudication](docs/redis-hotpath-adjudication.md)
+
+## Current Boundary Notes
+
+- The Redis hot path is now the first adjudicator for coupon claims.
+- MySQL still records the final claim, task, and outbox state.
+- The current Redis phase does not yet add a dedicated stale-reservation
+  reconciler.
+- Benchmark numbers are scenario-specific local measurements, not production
+  capacity claims.
