@@ -249,12 +249,12 @@ WHERE task_id = ?
 	return dead, nextRetry, nil
 }
 
-func (r *Repository) ListDueFailedForCompensation(ctx context.Context, limit int) ([]int64, error) {
+func (r *Repository) ListDueFailedForCompensation(ctx context.Context, limit int) ([]RecoveryCandidate, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := r.db.QueryContext(ctx, `
-SELECT task_id
+SELECT task_id, next_retry_at
 FROM async_tasks
 WHERE status = ? AND next_retry_at IS NOT NULL AND next_retry_at <= ?
 ORDER BY next_retry_at ASC
@@ -265,13 +265,14 @@ LIMIT ?
 	}
 	defer rows.Close()
 
-	result := make([]int64, 0, limit)
+	result := make([]RecoveryCandidate, 0, limit)
 	for rows.Next() {
-		var taskID int64
-		if scanErr := rows.Scan(&taskID); scanErr != nil {
+		var candidate RecoveryCandidate
+		if scanErr := rows.Scan(&candidate.TaskID, &candidate.RecoverAt); scanErr != nil {
 			return nil, fmt.Errorf("scan due failed task id: %w", scanErr)
 		}
-		result = append(result, taskID)
+		candidate.Source = RecoverySourceRetryDue
+		result = append(result, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate due failed tasks: %w", err)
@@ -279,12 +280,12 @@ LIMIT ?
 	return result, nil
 }
 
-func (r *Repository) ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error) {
+func (r *Repository) ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]RecoveryCandidate, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := r.db.QueryContext(ctx, `
-SELECT task_id
+SELECT task_id, updated_at
 FROM async_tasks
 WHERE status = ? AND updated_at <= ?
 ORDER BY updated_at ASC
@@ -295,13 +296,14 @@ LIMIT ?
 	}
 	defer rows.Close()
 
-	result := make([]int64, 0, limit)
+	result := make([]RecoveryCandidate, 0, limit)
 	for rows.Next() {
-		var taskID int64
-		if scanErr := rows.Scan(&taskID); scanErr != nil {
+		var candidate RecoveryCandidate
+		if scanErr := rows.Scan(&candidate.TaskID, &candidate.RecoverAt); scanErr != nil {
 			return nil, fmt.Errorf("scan suspended task id: %w", scanErr)
 		}
-		result = append(result, taskID)
+		candidate.Source = RecoverySourceSuspended
+		result = append(result, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate suspended tasks: %w", err)
@@ -309,12 +311,12 @@ LIMIT ?
 	return result, nil
 }
 
-func (r *Repository) ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error) {
+func (r *Repository) ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]RecoveryCandidate, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := r.db.QueryContext(ctx, `
-SELECT task_id
+SELECT task_id, updated_at
 FROM async_tasks
 WHERE status = ? AND updated_at <= ?
 ORDER BY updated_at ASC
@@ -325,13 +327,14 @@ LIMIT ?
 	}
 	defer rows.Close()
 
-	result := make([]int64, 0, limit)
+	result := make([]RecoveryCandidate, 0, limit)
 	for rows.Next() {
-		var taskID int64
-		if scanErr := rows.Scan(&taskID); scanErr != nil {
+		var candidate RecoveryCandidate
+		if scanErr := rows.Scan(&candidate.TaskID, &candidate.RecoverAt); scanErr != nil {
 			return nil, fmt.Errorf("scan stale running task id: %w", scanErr)
 		}
-		result = append(result, taskID)
+		candidate.Source = RecoverySourceStaleRunning
+		result = append(result, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate stale running tasks: %w", err)

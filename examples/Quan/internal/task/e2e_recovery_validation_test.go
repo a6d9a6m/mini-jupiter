@@ -491,15 +491,15 @@ func (r *injectedTaskRepo) MarkSuspended(ctx context.Context, taskID int64, last
 	return r.inner.MarkSuspended(ctx, taskID, lastErr)
 }
 
-func (r *injectedTaskRepo) ListDueFailedForCompensation(ctx context.Context, limit int) ([]int64, error) {
+func (r *injectedTaskRepo) ListDueFailedForCompensation(ctx context.Context, limit int) ([]RecoveryCandidate, error) {
 	return r.inner.ListDueFailedForCompensation(ctx, limit)
 }
 
-func (r *injectedTaskRepo) ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error) {
+func (r *injectedTaskRepo) ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]RecoveryCandidate, error) {
 	return r.inner.ListSuspendedForCompensation(ctx, staleBefore, limit)
 }
 
-func (r *injectedTaskRepo) ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error) {
+func (r *injectedTaskRepo) ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]RecoveryCandidate, error) {
 	return r.inner.ListStaleRunningForCompensation(ctx, staleBefore, limit)
 }
 

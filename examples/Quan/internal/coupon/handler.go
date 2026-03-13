@@ -18,11 +18,23 @@ const (
 )
 
 type Handler struct {
-	svc *Service
+	svc     *Service
+	metrics claimMetrics
 }
 
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+type claimMetrics interface {
+	ObserveCouponClaim(resultClass, resultCode string, duration time.Duration)
+}
+
+func (h *Handler) SetMetrics(metrics claimMetrics) {
+	if h == nil || metrics == nil {
+		return
+	}
+	h.metrics = metrics
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -31,27 +43,33 @@ func (h *Handler) Register(mux *http.ServeMux) {
 }
 
 func (h *Handler) claimCoupon(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	userID, ok := parseUserID(r)
 	if !ok {
+		h.observeClaim("client_error", "bad_request", time.Since(start))
 		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "invalid X-User-ID"))
 		return
 	}
 	couponID, ok := parsePathInt64(r.PathValue("coupon_id"))
 	if !ok {
+		h.observeClaim("client_error", "bad_request", time.Since(start))
 		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "invalid coupon_id"))
 		return
 	}
 	idemKey := strings.TrimSpace(r.Header.Get(headerIdempotencyKey))
 	if idemKey == "" {
+		h.observeClaim("client_error", "bad_request", time.Since(start))
 		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "missing Idempotency-Key"))
 		return
 	}
 
 	rec, err := h.svc.Claim(r.Context(), couponID, userID, idemKey)
 	if err != nil {
+		h.observeClaim(classifyClaimResult(err), classifyClaimCode(err), time.Since(start))
 		apperr.WriteHTTPWithContext(r.Context(), w, err)
 		return
 	}
+	h.observeClaim("success", "success", time.Since(start))
 
 	writeOK(r.Context(), w, map[string]any{
 		"claim_id":   rec.ID,
@@ -60,6 +78,58 @@ func (h *Handler) claimCoupon(w http.ResponseWriter, r *http.Request) {
 		"status":     rec.Status,
 		"claimed_at": rec.CreatedAt.Format(time.RFC3339),
 	})
+}
+
+func (h *Handler) observeClaim(resultClass, resultCode string, duration time.Duration) {
+	if h == nil || h.metrics == nil {
+		return
+	}
+	h.metrics.ObserveCouponClaim(resultClass, resultCode, duration)
+}
+
+func classifyClaimResult(err error) string {
+	if err == nil {
+		return "success"
+	}
+	status := apperr.HTTPStatus(err)
+	switch status {
+	case http.StatusConflict:
+		return "business_conflict"
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusTooManyRequests:
+		return "client_error"
+	default:
+		return "server_error"
+	}
+}
+
+func classifyClaimCode(err error) string {
+	if err == nil {
+		return "success"
+	}
+	if e, ok := err.(*apperr.Error); ok {
+		switch e.Code {
+		case apperr.CodeConflict:
+			switch e.Message {
+			case "already claimed":
+				return "already_claimed"
+			case "claim limit reached":
+				return "limit_reached"
+			case "coupon sold out":
+				return "sold_out"
+			default:
+				return "conflict"
+			}
+		case apperr.CodeBadRequest:
+			return "bad_request"
+		case apperr.CodeNotFound:
+			return "not_found"
+		case apperr.CodeTooManyRequests:
+			return "too_many_requests"
+		case apperr.CodeInternalError:
+			return "internal_error"
+		}
+	}
+	return "internal_error"
 }
 
 func (h *Handler) getMyClaim(w http.ResponseWriter, r *http.Request) {

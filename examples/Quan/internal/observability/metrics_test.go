@@ -2,6 +2,7 @@ package observability
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -38,5 +39,20 @@ func TestMetricsRecorders(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.taskFailRateGauge); got < 0.333 || got > 0.334 {
 		t.Fatalf("expected fail rate around 1/3, got %v", got)
+	}
+
+	m.ObserveCouponClaim("business_conflict", "already_claimed", 120*time.Millisecond)
+	if got := testutil.ToFloat64(m.couponClaimTotal.WithLabelValues("business_conflict", "already_claimed")); got != 1 {
+		t.Fatalf("expected coupon claim total 1, got %v", got)
+	}
+
+	m.ObserveTaskRecovery("suspended", 2*time.Second)
+	if got := testutil.ToFloat64(m.taskRecoveryTotal.WithLabelValues("suspended")); got != 1 {
+		t.Fatalf("expected task recovery total 1, got %v", got)
+	}
+
+	m.ObserveAppError(409)
+	if got := testutil.ToFloat64(m.appErrorTotal.WithLabelValues("business_conflict", "conflict")); got != 1 {
+		t.Fatalf("expected app conflict total 1, got %v", got)
 	}
 }

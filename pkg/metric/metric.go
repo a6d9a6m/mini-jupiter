@@ -33,7 +33,7 @@ func New(cfg Config) *Metrics {
 				Name:      "http_requests_total",
 				Help:      "Total number of HTTP requests.",
 			},
-			[]string{"method", "path", "status"},
+			[]string{"method", "path", "status", "status_class"},
 		),
 		reqLatency: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -42,7 +42,7 @@ func New(cfg Config) *Metrics {
 				Help:      "HTTP request duration in seconds.",
 				Buckets:   prometheus.DefBuckets,
 			},
-			[]string{"method", "path", "status"},
+			[]string{"method", "path", "status", "status_class"},
 		),
 		inFlight: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -74,9 +74,10 @@ func (m *Metrics) Observe(method, path string, status int, seconds float64) {
 		return
 	}
 	labels := prometheus.Labels{
-		"method": method,
-		"path":   path,
-		"status": strconv.Itoa(status),
+		"method":       method,
+		"path":         path,
+		"status":       strconv.Itoa(status),
+		"status_class": statusClass(status),
 	}
 	m.reqCount.With(labels).Inc()
 	m.reqLatency.With(labels).Observe(seconds)
@@ -109,4 +110,19 @@ func (m *Metrics) ObserveError(code int) {
 	m.errCount.With(prometheus.Labels{
 		"code": strconv.Itoa(code),
 	}).Inc()
+}
+
+func statusClass(status int) string {
+	switch {
+	case status >= 500:
+		return "5xx"
+	case status >= 400:
+		return "4xx"
+	case status >= 300:
+		return "3xx"
+	case status >= 200:
+		return "2xx"
+	default:
+		return "other"
+	}
 }

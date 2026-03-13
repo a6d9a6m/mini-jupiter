@@ -1,38 +1,51 @@
 {
   "id": null,
   "uid": "mini-jupiter",
-  "title": "Mini-Jupiter Overview",
+  "title": "Quan Reliability Overview",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "panels": [
     {
-      "type": "timeseries",
-      "title": "HTTP Requests / sec",
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "type": "stat",
+      "title": "Claim Success Rate (5m)",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(mini_jupiter_http_requests_total[1m]))",
-          "legendFormat": "rps",
+          "expr": "100 * sum(rate(mini_jupiter_quan_coupon_claim_total{result_class=\"success\"}[5m])) / clamp_min(sum(rate(mini_jupiter_quan_coupon_claim_total[5m])), 0.0001)",
           "refId": "A"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 95 },
+              { "color": "green", "value": 99 }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "type": "timeseries",
-      "title": "Latency (P95/P99)",
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "title": "Claim Latency (P95/P99)",
+      "gridPos": { "x": 6, "y": 0, "w": 12, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(mini_jupiter_http_request_duration_seconds_bucket[1m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(mini_jupiter_quan_coupon_claim_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p95",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(mini_jupiter_http_request_duration_seconds_bucket[1m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(mini_jupiter_quan_coupon_claim_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p99",
           "refId": "B"
         }
@@ -40,26 +53,93 @@
     },
     {
       "type": "timeseries",
-      "title": "In-flight Requests",
-      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "title": "Claim Conflict vs Server Fault Rate",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
-          "expr": "sum(mini_jupiter_http_inflight_requests)",
-          "legendFormat": "inflight",
+          "expr": "sum(rate(mini_jupiter_quan_coupon_claim_total{result_class=~\"business_conflict|server_error\"}[5m])) by (result_class, result_code)",
+          "legendFormat": "{{result_class}}/{{result_code}}",
           "refId": "A"
         }
       ]
     },
     {
       "type": "timeseries",
-      "title": "Errors by Code (rate)",
-      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "title": "HTTP 409 vs 5xx",
+      "gridPos": { "x": 0, "y": 6, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(mini_jupiter_http_error_total[1m])) by (code)",
-          "legendFormat": "{{code}}",
+          "expr": "sum(rate(mini_jupiter_quan_http_requests_total{path=\"POST /api/v1/coupons/{coupon_id}/claim\",status=\"409\"}[5m]))",
+          "legendFormat": "409 conflicts",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(mini_jupiter_quan_http_requests_total{path=\"POST /api/v1/coupons/{coupon_id}/claim\",status_class=\"5xx\"}[5m]))",
+          "legendFormat": "5xx",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox Backlog",
+      "gridPos": { "x": 12, "y": 6, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "mini_jupiter_quan_outbox_pending",
+          "legendFormat": "pending",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Task Retry and DLQ Rate",
+      "gridPos": { "x": 18, "y": 6, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(mini_jupiter_quan_task_retry_total[5m]))",
+          "legendFormat": "retry rate",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(mini_jupiter_quan_task_dlq_total[5m]))",
+          "legendFormat": "dlq rate",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Task Recovery Latency (P95/P99)",
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(mini_jupiter_quan_task_recovery_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(mini_jupiter_quan_task_recovery_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Task Recovery Throughput by Source",
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(mini_jupiter_quan_task_recovery_total[5m])) by (source)",
+          "legendFormat": "{{source}}",
           "refId": "A"
         }
       ]

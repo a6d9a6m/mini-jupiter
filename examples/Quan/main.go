@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"mini-jupiter/examples/Quan/internal/task"
 	"mini-jupiter/internal/middleware"
 	"mini-jupiter/pkg/config"
+	apperr "mini-jupiter/pkg/errors"
 	applog "mini-jupiter/pkg/log"
 	"mini-jupiter/pkg/metric"
 	"mini-jupiter/pkg/mysql"
@@ -150,14 +152,20 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("pong"))
 	})
-	var quanMetrics *observability.Metrics
+	var (
+		quanMetrics *observability.Metrics
+		httpMetrics *metric.Metrics
+	)
 	if cfg.Metric.Enabled {
+		httpMetrics = metric.New(cfg.Metric)
 		quanMetrics = observability.New(cfg.Metric.Namespace, nil, nil)
+		apperr.SetReporter(quanMetrics.ObserveAppError)
 		metricPath := cfg.Metric.Path
 		if metricPath == "" {
 			metricPath = "/metrics"
 		}
 		mux.Handle(metricPath, quanMetrics.Handler())
+		handler.SetMetrics(quanMetrics)
 	}
 	handler.Register(mux)
 	taskHTTPHandler.Register(mux)
@@ -168,6 +176,11 @@ func main() {
 		if consumer != nil {
 			consumer.SetMetrics(quanMetrics)
 		}
+		if taskCompensate != nil {
+			taskCompensate.SetMetrics(quanMetrics)
+		}
+	} else {
+		apperr.SetReporter(nil)
 	}
 
 	var middlewares []middleware.Middleware
@@ -178,7 +191,7 @@ func main() {
 		middlewares = append(middlewares, middleware.TraceID())
 	}
 	if cfg.Middleware.Logging {
-		middlewares = append(middlewares, middleware.Logging(nil))
+		middlewares = append(middlewares, middleware.Logging(httpMetrics))
 	}
 	httpHandler := middleware.Chain(middlewares...)(mux)
 
@@ -215,12 +228,18 @@ func main() {
 }
 
 type httpComponent struct {
-	server *http.Server
+	server   *http.Server
+	listener net.Listener
 }
 
 func (h *httpComponent) Start(_ context.Context) error {
+	ln, err := net.Listen("tcp", h.server.Addr)
+	if err != nil {
+		return err
+	}
+	h.listener = ln
 	go func() {
-		if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := h.server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			applog.L(context.Background()).Error("http server error", zap.Error(err))
 		}
 	}()

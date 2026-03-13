@@ -32,24 +32,33 @@ func (c CompensationConfig) withDefaults() CompensationConfig {
 }
 
 type Compensator struct {
-	cfg   CompensationConfig
-	repo  compensationRepository
-	queue compensationQueue
+	cfg     CompensationConfig
+	repo    compensationRepository
+	queue   compensationQueue
+	metrics compensationMetrics
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
 type compensationRepository interface {
-	ListDueFailedForCompensation(ctx context.Context, limit int) ([]int64, error)
-	ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error)
-	ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]int64, error)
+	ListDueFailedForCompensation(ctx context.Context, limit int) ([]RecoveryCandidate, error)
+	ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]RecoveryCandidate, error)
+	ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]RecoveryCandidate, error)
 	MarkRecoveredForRetry(ctx context.Context, taskID int64, lastErr string) (bool, error)
 }
 
 type compensationQueue interface {
 	ScheduleRetry(ctx context.Context, taskID int64, retryAt time.Time) error
 }
+
+type compensationMetrics interface {
+	ObserveTaskRecovery(source string, latency time.Duration)
+}
+
+type noopCompensationMetrics struct{}
+
+func (noopCompensationMetrics) ObserveTaskRecovery(string, time.Duration) {}
 
 func NewCompensator(repo compensationRepository, queue compensationQueue, cfg CompensationConfig) (*Compensator, error) {
 	cfg = cfg.withDefaults()
@@ -63,10 +72,18 @@ func NewCompensator(repo compensationRepository, queue compensationQueue, cfg Co
 		return nil, fmt.Errorf("task compensator queue is nil")
 	}
 	return &Compensator{
-		cfg:   cfg,
-		repo:  repo,
-		queue: queue,
+		cfg:     cfg,
+		repo:    repo,
+		queue:   queue,
+		metrics: noopCompensationMetrics{},
 	}, nil
+}
+
+func (c *Compensator) SetMetrics(metrics compensationMetrics) {
+	if c == nil || metrics == nil {
+		return
+	}
+	c.metrics = metrics
 }
 
 func (c *Compensator) Start(ctx context.Context) error {
@@ -110,51 +127,52 @@ func (c *Compensator) run(ctx context.Context) {
 }
 
 func (c *Compensator) compensateOnce(ctx context.Context) error {
-	taskIDs, err := c.repo.ListDueFailedForCompensation(ctx, c.cfg.BatchSize)
+	candidates, err := c.repo.ListDueFailedForCompensation(ctx, c.cfg.BatchSize)
 	if err != nil {
 		return err
 	}
 	staleBefore := time.Now().UTC().Add(-c.cfg.StaleTimeout)
-	suspendedIDs, err := c.repo.ListSuspendedForCompensation(ctx, staleBefore, c.cfg.BatchSize)
+	suspendedCandidates, err := c.repo.ListSuspendedForCompensation(ctx, staleBefore, c.cfg.BatchSize)
 	if err != nil {
 		return err
 	}
-	staleRunningIDs, err := c.repo.ListStaleRunningForCompensation(ctx, staleBefore, c.cfg.BatchSize)
+	staleRunningCandidates, err := c.repo.ListStaleRunningForCompensation(ctx, staleBefore, c.cfg.BatchSize)
 	if err != nil {
 		return err
 	}
-	if len(taskIDs) == 0 && len(suspendedIDs) == 0 && len(staleRunningIDs) == 0 {
+	if len(candidates) == 0 && len(suspendedCandidates) == 0 && len(staleRunningCandidates) == 0 {
 		return nil
 	}
 
-	for _, taskID := range staleRunningIDs {
-		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, taskID, "stale RUNNING recovered for retry")
+	for _, candidate := range staleRunningCandidates {
+		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, candidate.TaskID, "stale RUNNING recovered for retry")
 		if recoverErr != nil {
-			applog.L(ctx).Warn("recover stale running task failed", zap.Int64("task_id", taskID), zap.Error(recoverErr))
+			applog.L(ctx).Warn("recover stale running task failed", zap.Int64("task_id", candidate.TaskID), zap.Error(recoverErr))
 			continue
 		}
 		if ok {
-			taskIDs = append(taskIDs, taskID)
+			candidates = append(candidates, candidate)
 		}
 	}
-	for _, taskID := range suspendedIDs {
-		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, taskID, "suspended task recovered for retry")
+	for _, candidate := range suspendedCandidates {
+		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, candidate.TaskID, "suspended task recovered for retry")
 		if recoverErr != nil {
-			applog.L(ctx).Warn("recover suspended task failed", zap.Int64("task_id", taskID), zap.Error(recoverErr))
+			applog.L(ctx).Warn("recover suspended task failed", zap.Int64("task_id", candidate.TaskID), zap.Error(recoverErr))
 			continue
 		}
 		if ok {
-			taskIDs = append(taskIDs, taskID)
+			candidates = append(candidates, candidate)
 		}
 	}
 
 	now := time.Now().UTC()
 	recovered := 0
-	for _, taskID := range taskIDs {
-		if err := c.queue.ScheduleRetry(ctx, taskID, now); err != nil {
-			applog.L(ctx).Warn("task compensation schedule retry failed", zap.Int64("task_id", taskID), zap.Error(err))
+	for _, candidate := range candidates {
+		if err := c.queue.ScheduleRetry(ctx, candidate.TaskID, now); err != nil {
+			applog.L(ctx).Warn("task compensation schedule retry failed", zap.Int64("task_id", candidate.TaskID), zap.Error(err))
 			continue
 		}
+		c.metrics.ObserveTaskRecovery(candidate.Source, now.Sub(candidate.RecoverAt))
 		recovered++
 	}
 	if recovered > 0 {

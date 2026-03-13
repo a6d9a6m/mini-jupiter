@@ -2,18 +2,27 @@ package observability
 
 import (
 	"net/http"
+	"strconv"
 	"sync/atomic"
+	"time"
+
+	apperr "mini-jupiter/pkg/errors"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Metrics struct {
-	outboxPendingGauge prometheus.Gauge
-	taskRetryTotal     prometheus.Counter
-	taskDLQTotal       prometheus.Counter
-	taskConsumeTotal   *prometheus.CounterVec
-	taskFailRateGauge  prometheus.Gauge
+	outboxPendingGauge  prometheus.Gauge
+	taskRetryTotal      prometheus.Counter
+	taskDLQTotal        prometheus.Counter
+	taskConsumeTotal    *prometheus.CounterVec
+	taskFailRateGauge   prometheus.Gauge
+	couponClaimTotal    *prometheus.CounterVec
+	couponClaimLatency  *prometheus.HistogramVec
+	taskRecoveryTotal   *prometheus.CounterVec
+	taskRecoveryLatency *prometheus.HistogramVec
+	appErrorTotal       *prometheus.CounterVec
 
 	consumeSuccess uint64
 	consumeFail    uint64
@@ -57,6 +66,33 @@ func New(namespace string, reg prometheus.Registerer, gatherer prometheus.Gather
 			Name:      "task_consume_fail_rate",
 			Help:      "Task consume fail ratio (fail/total).",
 		}),
+		couponClaimTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "coupon_claim_total",
+			Help:      "Total number of coupon claim results by normalized outcome.",
+		}, []string{"result_class", "result_code"}),
+		couponClaimLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "coupon_claim_duration_seconds",
+			Help:      "Coupon claim request latency in seconds.",
+			Buckets:   prometheus.DefBuckets,
+		}, []string{"result_class"}),
+		taskRecoveryTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "task_recovery_total",
+			Help:      "Total number of task recoveries by source.",
+		}, []string{"source"}),
+		taskRecoveryLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "task_recovery_latency_seconds",
+			Help:      "Latency from task becoming recoverable to compensator rescheduling it.",
+			Buckets:   prometheus.DefBuckets,
+		}, []string{"source"}),
+		appErrorTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "app_error_total",
+			Help:      "Application errors grouped by normalized class and code.",
+		}, []string{"class", "code"}),
 		gatherer: gatherer,
 	}
 	reg.MustRegister(
@@ -65,6 +101,11 @@ func New(namespace string, reg prometheus.Registerer, gatherer prometheus.Gather
 		m.taskDLQTotal,
 		m.taskConsumeTotal,
 		m.taskFailRateGauge,
+		m.couponClaimTotal,
+		m.couponClaimLatency,
+		m.taskRecoveryTotal,
+		m.taskRecoveryLatency,
+		m.appErrorTotal,
 	)
 	return m
 }
@@ -115,6 +156,38 @@ func (m *Metrics) IncConsumeFailure() {
 	m.refreshFailRate()
 }
 
+func (m *Metrics) ObserveCouponClaim(resultClass, resultCode string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	if resultClass == "" {
+		resultClass = "unknown"
+	}
+	if resultCode == "" {
+		resultCode = "unknown"
+	}
+	m.couponClaimTotal.WithLabelValues(resultClass, resultCode).Inc()
+	m.couponClaimLatency.WithLabelValues(resultClass).Observe(duration.Seconds())
+}
+
+func (m *Metrics) ObserveTaskRecovery(source string, latency time.Duration) {
+	if m == nil {
+		return
+	}
+	if source == "" {
+		source = "unknown"
+	}
+	m.taskRecoveryTotal.WithLabelValues(source).Inc()
+	m.taskRecoveryLatency.WithLabelValues(source).Observe(latency.Seconds())
+}
+
+func (m *Metrics) ObserveAppError(code int) {
+	if m == nil || code == apperr.CodeOK {
+		return
+	}
+	m.appErrorTotal.WithLabelValues(classifyAppError(code), classifyAppErrorCode(code)).Inc()
+}
+
 func (m *Metrics) refreshFailRate() {
 	fail := atomic.LoadUint64(&m.consumeFail)
 	success := atomic.LoadUint64(&m.consumeSuccess)
@@ -124,4 +197,40 @@ func (m *Metrics) refreshFailRate() {
 		return
 	}
 	m.taskFailRateGauge.Set(float64(fail) / float64(total))
+}
+
+func classifyAppError(code int) string {
+	switch code {
+	case apperr.CodeConflict:
+		return "business_conflict"
+	case apperr.CodeBadRequest, apperr.CodeNotFound, apperr.CodeTooManyRequests:
+		return "client_error"
+	case apperr.CodeInternalError:
+		return "server_error"
+	default:
+		if code >= 500 {
+			return "server_error"
+		}
+		if code >= 400 {
+			return "client_error"
+		}
+		return "unknown"
+	}
+}
+
+func classifyAppErrorCode(code int) string {
+	switch code {
+	case apperr.CodeConflict:
+		return "conflict"
+	case apperr.CodeBadRequest:
+		return "bad_request"
+	case apperr.CodeNotFound:
+		return "not_found"
+	case apperr.CodeTooManyRequests:
+		return "too_many_requests"
+	case apperr.CodeInternalError:
+		return "internal_error"
+	default:
+		return "code_" + strconv.Itoa(code)
+	}
 }

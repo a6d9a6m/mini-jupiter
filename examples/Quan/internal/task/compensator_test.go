@@ -9,7 +9,11 @@ import (
 
 func TestCompensator_compensateOnce_Success(t *testing.T) {
 	repo := &fakeCompRepo{
-		taskIDs: []int64{101, 102, 103},
+		taskIDs: []RecoveryCandidate{
+			{TaskID: 101, Source: RecoverySourceRetryDue, RecoverAt: time.Now().UTC().Add(-time.Second)},
+			{TaskID: 102, Source: RecoverySourceRetryDue, RecoverAt: time.Now().UTC().Add(-time.Second)},
+			{TaskID: 103, Source: RecoverySourceRetryDue, RecoverAt: time.Now().UTC().Add(-time.Second)},
+		},
 	}
 	queue := &fakeCompQueue{}
 	comp, err := NewCompensator(repo, queue, CompensationConfig{
@@ -45,7 +49,11 @@ func TestCompensator_compensateOnce_ListFailedError(t *testing.T) {
 
 func TestCompensator_compensateOnce_PartialQueueFailure(t *testing.T) {
 	repo := &fakeCompRepo{
-		taskIDs: []int64{201, 202, 203},
+		taskIDs: []RecoveryCandidate{
+			{TaskID: 201, Source: RecoverySourceRetryDue, RecoverAt: time.Now().UTC().Add(-time.Second)},
+			{TaskID: 202, Source: RecoverySourceRetryDue, RecoverAt: time.Now().UTC().Add(-time.Second)},
+			{TaskID: 203, Source: RecoverySourceRetryDue, RecoverAt: time.Now().UTC().Add(-time.Second)},
+		},
 	}
 	queue := &fakeCompQueue{
 		failTaskID: 202,
@@ -64,33 +72,33 @@ func TestCompensator_compensateOnce_PartialQueueFailure(t *testing.T) {
 }
 
 type fakeCompRepo struct {
-	taskIDs         []int64
-	suspendedIDs    []int64
-	staleRunningIDs []int64
+	taskIDs         []RecoveryCandidate
+	suspendedIDs    []RecoveryCandidate
+	staleRunningIDs []RecoveryCandidate
 	listErr         error
 	recoverErr      error
 	recovered       []int64
 }
 
-func (f *fakeCompRepo) ListDueFailedForCompensation(_ context.Context, _ int) ([]int64, error) {
+func (f *fakeCompRepo) ListDueFailedForCompensation(_ context.Context, _ int) ([]RecoveryCandidate, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return append([]int64(nil), f.taskIDs...), nil
+	return append([]RecoveryCandidate(nil), f.taskIDs...), nil
 }
 
-func (f *fakeCompRepo) ListSuspendedForCompensation(_ context.Context, _ time.Time, _ int) ([]int64, error) {
+func (f *fakeCompRepo) ListSuspendedForCompensation(_ context.Context, _ time.Time, _ int) ([]RecoveryCandidate, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return append([]int64(nil), f.suspendedIDs...), nil
+	return append([]RecoveryCandidate(nil), f.suspendedIDs...), nil
 }
 
-func (f *fakeCompRepo) ListStaleRunningForCompensation(_ context.Context, _ time.Time, _ int) ([]int64, error) {
+func (f *fakeCompRepo) ListStaleRunningForCompensation(_ context.Context, _ time.Time, _ int) ([]RecoveryCandidate, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return append([]int64(nil), f.staleRunningIDs...), nil
+	return append([]RecoveryCandidate(nil), f.staleRunningIDs...), nil
 }
 
 func (f *fakeCompRepo) MarkRecoveredForRetry(_ context.Context, taskID int64, _ string) (bool, error) {
@@ -116,8 +124,12 @@ func (f *fakeCompQueue) ScheduleRetry(_ context.Context, taskID int64, _ time.Ti
 
 func TestCompensator_compensateOnce_RecoversSuspendedAndStaleRunning(t *testing.T) {
 	repo := &fakeCompRepo{
-		suspendedIDs:    []int64{301},
-		staleRunningIDs: []int64{302},
+		suspendedIDs: []RecoveryCandidate{
+			{TaskID: 301, Source: RecoverySourceSuspended, RecoverAt: time.Now().UTC().Add(-2 * time.Second)},
+		},
+		staleRunningIDs: []RecoveryCandidate{
+			{TaskID: 302, Source: RecoverySourceStaleRunning, RecoverAt: time.Now().UTC().Add(-3 * time.Second)},
+		},
 	}
 	queue := &fakeCompQueue{}
 	comp, err := NewCompensator(repo, queue, CompensationConfig{Enabled: true})

@@ -50,6 +50,9 @@ func (h *SendCouponNoticeHandler) Handle(ctx context.Context, task AsyncTask) er
 	if err := json.Unmarshal(task.Payload, &payload); err != nil {
 		return fmt.Errorf("decode SEND_COUPON_NOTICE payload: %w", err)
 	}
+	if payload.TraceID != "" {
+		ctx = applog.WithTraceID(ctx, payload.TraceID)
+	}
 	applog.L(ctx).Info("coupon notice task consumed",
 		zap.Int64("task_id", task.ID),
 		zap.Int64("claim_id", payload.ClaimID),

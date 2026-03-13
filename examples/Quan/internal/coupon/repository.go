@@ -10,6 +10,7 @@ import (
 
 	"mini-jupiter/examples/Quan/internal/outbox"
 	"mini-jupiter/examples/Quan/internal/task"
+	applog "mini-jupiter/pkg/log"
 	"mini-jupiter/pkg/mysql"
 
 	mysqlerr "github.com/go-sql-driver/mysql"
@@ -265,6 +266,7 @@ func (r *Repository) createTaskAndOutbox(ctx context.Context, tx *sql.Tx, rec Cl
 		ClaimID:  rec.ID,
 		CouponID: rec.CouponID,
 		UserID:   rec.UserID,
+		TraceID:  applog.TraceIDFromContext(ctx),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal task payload: %w", err)

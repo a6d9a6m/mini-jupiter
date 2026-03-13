@@ -13,22 +13,29 @@ import (
 func Logging(m *metric.Metrics) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pathLabel := r.URL.Path
+			if r.Pattern != "" {
+				pathLabel = r.Pattern
+			}
 			if m != nil {
-				m.IncInFlight(r.Method, r.URL.Path)
-				defer m.DecInFlight(r.Method, r.URL.Path)
+				m.IncInFlight(r.Method, pathLabel)
+				defer m.DecInFlight(r.Method, pathLabel)
 			}
 			start := time.Now()
 			rec := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 
 			next.ServeHTTP(rec, r)
 
+			if r.Pattern != "" {
+				pathLabel = r.Pattern
+			}
 			cost := time.Since(start)
 			if m != nil {
-				m.Observe(r.Method, r.URL.Path, rec.status, cost.Seconds())
+				m.Observe(r.Method, pathLabel, rec.status, cost.Seconds())
 			}
 			applog.L(r.Context()).Info("http request",
 				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
+				zap.String("path", pathLabel),
 				zap.Int("status", rec.status),
 				zap.Duration("cost", cost),
 			)
