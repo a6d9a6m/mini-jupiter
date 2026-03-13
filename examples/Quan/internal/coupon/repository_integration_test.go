@@ -86,6 +86,139 @@ func TestRepository_IdempotencySameKeyReturnsSameClaim(t *testing.T) {
 	}
 }
 
+func TestRepository_AlreadyClaimedWhenPerUserLimitIsOne(t *testing.T) {
+	db := openIntegrationDB(t)
+	ctx := context.Background()
+	couponID := nextTestCouponID()
+	resetTestData(t, db, couponID)
+	createCampaign(t, db, couponID, 5, 1)
+
+	txm, err := mysql.NewTxManager(db)
+	if err != nil {
+		t.Fatalf("new tx manager failed: %v", err)
+	}
+	repo := NewRepository(db, txm, nil, nil, 0)
+
+	rec, err := repo.ClaimCoupon(ctx, couponID, 21001, "first-key")
+	if err != nil {
+		t.Fatalf("first claim failed: %v", err)
+	}
+	if _, err := repo.ClaimCoupon(ctx, couponID, 21001, "second-key"); !errors.Is(err, ErrAlreadyClaimed) {
+		t.Fatalf("expected ErrAlreadyClaimed, got: %v", err)
+	}
+
+	if got := countClaimsByUser(t, db, couponID, 21001); got != 1 {
+		t.Fatalf("expected one claim record, got %d", got)
+	}
+	if got := loadCampaignStock(t, db, couponID); got != 4 {
+		t.Fatalf("expected available stock 4, got %d", got)
+	}
+
+	stored, err := repo.FindClaimByUser(ctx, couponID, 21001)
+	if err != nil {
+		t.Fatalf("load stored claim failed: %v", err)
+	}
+	if stored.ID != rec.ID {
+		t.Fatalf("expected stored claim id %d, got %d", rec.ID, stored.ID)
+	}
+}
+
+func TestRepository_ConcurrentReplaySameIdempotencyReturnsSameClaim(t *testing.T) {
+	db := openIntegrationDB(t)
+	ctx := context.Background()
+	couponID := nextTestCouponID()
+	resetTestData(t, db, couponID)
+	createCampaign(t, db, couponID, 10, 1)
+
+	txm, err := mysql.NewTxManager(db)
+	if err != nil {
+		t.Fatalf("new tx manager failed: %v", err)
+	}
+	repo := NewRepository(db, txm, nil, nil, 0)
+
+	const concurrency = 32
+	var (
+		wg         sync.WaitGroup
+		errCount   int64
+		unexpected []string
+		sampleMu   sync.Mutex
+		claimIDs   = make(chan int64, concurrency)
+	)
+
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			rec, err := repo.ClaimCoupon(ctx, couponID, 22001, "replay-key")
+			if err != nil {
+				atomic.AddInt64(&errCount, 1)
+				sampleMu.Lock()
+				if len(unexpected) < 5 {
+					unexpected = append(unexpected, err.Error())
+				}
+				sampleMu.Unlock()
+				return
+			}
+			claimIDs <- rec.ID
+		}()
+	}
+	wg.Wait()
+	close(claimIDs)
+
+	if errCount != 0 {
+		t.Fatalf("expected no errors, got %d samples=%v", errCount, unexpected)
+	}
+
+	var firstID int64
+	for claimID := range claimIDs {
+		if firstID == 0 {
+			firstID = claimID
+			continue
+		}
+		if claimID != firstID {
+			t.Fatalf("expected all replayed calls to return claim id %d, got %d", firstID, claimID)
+		}
+	}
+	if firstID == 0 {
+		t.Fatal("expected at least one claim id result")
+	}
+
+	if got := countClaimsByUser(t, db, couponID, 22001); got != 1 {
+		t.Fatalf("expected one persisted claim record, got %d", got)
+	}
+	if got := loadCampaignStock(t, db, couponID); got != 9 {
+		t.Fatalf("expected available stock 9, got %d", got)
+	}
+}
+
+func TestRepository_SoldOutAfterStockExhausted(t *testing.T) {
+	db := openIntegrationDB(t)
+	ctx := context.Background()
+	couponID := nextTestCouponID()
+	resetTestData(t, db, couponID)
+	createCampaign(t, db, couponID, 1, 1)
+
+	txm, err := mysql.NewTxManager(db)
+	if err != nil {
+		t.Fatalf("new tx manager failed: %v", err)
+	}
+	repo := NewRepository(db, txm, nil, nil, 0)
+
+	if _, err := repo.ClaimCoupon(ctx, couponID, 23001, "first"); err != nil {
+		t.Fatalf("first claim failed: %v", err)
+	}
+	if _, err := repo.ClaimCoupon(ctx, couponID, 23002, "second"); !errors.Is(err, ErrSoldOut) {
+		t.Fatalf("expected ErrSoldOut, got: %v", err)
+	}
+
+	if got := countClaimsByCoupon(t, db, couponID); got != 1 {
+		t.Fatalf("expected one claim record, got %d", got)
+	}
+	if got := loadCampaignStock(t, db, couponID); got != 0 {
+		t.Fatalf("expected available stock 0, got %d", got)
+	}
+}
+
 func TestRepository_ConcurrentClaimNoOversell(t *testing.T) {
 	db := openIntegrationDB(t)
 	ctx := context.Background()

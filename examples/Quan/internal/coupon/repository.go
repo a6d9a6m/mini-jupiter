@@ -89,6 +89,9 @@ func (r *Repository) ClaimCoupon(ctx context.Context, couponID, userID int64, id
 			limit = 1
 		}
 		if userClaimCount >= limit {
+			if limit == 1 {
+				return ErrAlreadyClaimed
+			}
 			return ErrClaimLimitReached
 		}
 
