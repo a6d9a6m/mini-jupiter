@@ -66,12 +66,14 @@ $summary = [ordered]@{
     checked_at = (Get-Date).ToUniversalTime().ToString("o")
     benchmark = [ordered]@{
         report_path = $ReportOut
+        requests = $Requests
+        concurrency = $Concurrency
         qps = $report.qps
         p95_ms = $report.latency_ms.p95
         p99_ms = $report.latency_ms.p99
         success = $report.business.success
         conflict = $report.http_status_counts.PSObject.Properties["409"].Value
-        transport_errors = ($report.transport_errors.PSObject.Properties | Measure-Object).Count
+        transport_errors = (($report.transport_errors.PSObject.Properties | ForEach-Object { [int]$_.Value }) | Measure-Object -Sum).Sum
     }
     ledger_audit = $audit
 }

@@ -36,7 +36,9 @@ Outputs:
 Script:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-high-conflict.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-high-conflict.ps1 `
+  -Requests 100000 `
+  -Concurrency 60
 ```
 
 Purpose:
@@ -50,6 +52,12 @@ Outputs:
 - benchmark report JSON
 - ledger audit JSON
 - combined summary JSON
+
+Representative heavy sample:
+
+- `100000` requests
+- `60` concurrency
+- stock pressure fixed at the configured campaign stock
 
 ## 2. Ledger Consistency Audit
 
@@ -77,7 +85,8 @@ Checks:
 Script:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-fault-recovery.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-fault-recovery.ps1 `
+  -RepeatCount 50
 ```
 
 Purpose:
@@ -97,3 +106,9 @@ Coverage:
 - short Redis outage
 - stale running recovery
 - DLQ replay
+
+Outputs:
+
+- per-run pass/failure records
+- per-scenario aggregate pass rate
+- total sample count and average recovery time

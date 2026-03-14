@@ -85,8 +85,8 @@ Purpose-specific verification scripts:
   Audits a coupon campaign directly from MySQL and optionally cross-checks a
   benchmark report.
 - `scripts/quan-run-fault-recovery.ps1`
-  Executes the deterministic fault-injection recovery suite and writes a JSON
-  summary.
+  Executes the deterministic fault-injection recovery suite, supports repeated
+  runs per scenario, and writes a JSON summary.
 
 Example:
 
@@ -113,6 +113,21 @@ powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-capacity.ps1 `
   -RequestsPerStep 20000 `
   -DurationSeconds 10 `
   -StopOnFirstFailure
+```
+
+Heavy high-conflict example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-high-conflict.ps1 `
+  -Requests 100000 `
+  -Concurrency 60
+```
+
+Repeated fault-recovery example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-fault-recovery.ps1 `
+  -RepeatCount 50
 ```
 
 The benchmark and recovery scripts assume local MySQL/Redis are already

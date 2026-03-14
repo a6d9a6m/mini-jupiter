@@ -9,6 +9,24 @@ Use the first lane when you want replay/conflict behavior evidence. Use the
 second lane when you want to find the first failing concurrency level on the
 steady-success claim path.
 
+## High-Conflict Pressure
+
+Script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-high-conflict.ps1 `
+  -Requests 100000 `
+  -Concurrency 60
+```
+
+Method:
+
+- traffic uses unique users and unique idempotency keys
+- stock remains intentionally low relative to total requests, so the scenario
+  measures explicit conflict handling under sustained contention
+- the run is followed by a MySQL ledger audit to verify no oversell, no
+  per-user overflow, and no benchmark-vs-ledger drift
+
 ## Capacity Scan
 
 Script:
