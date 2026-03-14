@@ -9,11 +9,12 @@ import (
 )
 
 func (r *Repository) TryMarkRunning(ctx context.Context, taskID int64) (AsyncTask, bool, error) {
+	now := time.Now().UTC()
 	res, err := r.db.ExecContext(ctx, `
 UPDATE async_tasks
-SET status = ?, last_error = '', updated_at = ?
+SET status = ?, last_error = '', version = version + 1, updated_at = ?
 WHERE task_id = ? AND status IN (?, ?)
-`, StatusRunning, time.Now().UTC(), taskID, StatusPending, StatusFailed)
+`, StatusRunning, now, taskID, StatusPending, StatusFailed)
 	if err != nil {
 		return AsyncTask{}, false, fmt.Errorf("mark task running: %w", err)
 	}
@@ -34,36 +35,39 @@ WHERE task_id = ? AND status IN (?, ?)
 	return task, true, nil
 }
 
-func (r *Repository) MarkSuccess(ctx context.Context, taskID int64) error {
-	_, err := r.db.ExecContext(ctx, `
+func (r *Repository) MarkSuccess(ctx context.Context, taskID int64, expectedVersion int64) error {
+	now := time.Now().UTC()
+	res, err := r.db.ExecContext(ctx, `
 UPDATE async_tasks
-SET status = ?, last_error = '', next_retry_at = NULL, updated_at = ?
-WHERE task_id = ? AND status = ?
-`, StatusSuccess, time.Now().UTC(), taskID, StatusRunning)
+SET status = ?, last_error = '', next_retry_at = NULL, version = version + 1, updated_at = ?
+WHERE task_id = ? AND status = ? AND version = ?
+`, StatusSuccess, now, taskID, StatusRunning, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("mark task success: %w", err)
 	}
-	return nil
+	return taskCASResult(res, "mark task success")
 }
 
-func (r *Repository) MarkSuspended(ctx context.Context, taskID int64, lastErr string) error {
-	_, err := r.db.ExecContext(ctx, `
+func (r *Repository) MarkSuspended(ctx context.Context, taskID int64, expectedVersion int64, lastErr string) error {
+	now := time.Now().UTC()
+	res, err := r.db.ExecContext(ctx, `
 UPDATE async_tasks
-SET status = ?, last_error = ?, next_retry_at = NULL, updated_at = ?
-WHERE task_id = ? AND status = ?
-`, StatusSuspended, truncate(lastErr, 255), time.Now().UTC(), taskID, StatusRunning)
+SET status = ?, last_error = ?, next_retry_at = NULL, version = version + 1, updated_at = ?
+WHERE task_id = ? AND status = ? AND version = ?
+`, StatusSuspended, truncate(lastErr, 255), now, taskID, StatusRunning, expectedVersion)
 	if err != nil {
 		return fmt.Errorf("mark task suspended: %w", err)
 	}
-	return nil
+	return taskCASResult(res, "mark task suspended")
 }
 
 func (r *Repository) MarkReplayReady(ctx context.Context, taskID int64) error {
+	now := time.Now().UTC()
 	res, err := r.db.ExecContext(ctx, `
 UPDATE async_tasks
-SET status = ?, next_retry_at = NULL, updated_at = ?
+SET status = ?, next_retry_at = NULL, version = version + 1, updated_at = ?
 WHERE task_id = ? AND status IN (?, ?)
-`, StatusFailed, time.Now().UTC(), taskID, StatusDead, StatusFailed)
+`, StatusFailed, now, taskID, StatusDead, StatusFailed)
 	if err != nil {
 		return fmt.Errorf("mark task replay ready: %w", err)
 	}
@@ -89,7 +93,7 @@ WHERE task_id = ? AND status IN (?, ?)
 func (r *Repository) RestoreDeadAfterReplayFailure(ctx context.Context, taskID int64) error {
 	_, err := r.db.ExecContext(ctx, `
 UPDATE async_tasks
-SET status = ?, updated_at = ?
+SET status = ?, version = version + 1, updated_at = ?
 WHERE task_id = ? AND status = ?
 `, StatusDead, time.Now().UTC(), taskID, StatusFailed)
 	if err != nil {
@@ -98,73 +102,68 @@ WHERE task_id = ? AND status = ?
 	return nil
 }
 
-func (r *Repository) MarkFailed(ctx context.Context, taskID int64, lastErr string, backoffBase time.Duration) (bool, *time.Time, error) {
+func (r *Repository) MarkFailed(ctx context.Context, taskID int64, expectedVersion int64, lastErr string, backoffBase time.Duration) (bool, *time.Time, error) {
 	var (
-		dead      bool
-		nextRetry *time.Time
+		status     string
+		retryCount int
+		maxRetry   int
 	)
-	err := r.txm.WithinTx(ctx, nil, func(ctx context.Context, tx *sql.Tx) error {
-		var (
-			status     string
-			retryCount int
-			maxRetry   int
-		)
-		err := tx.QueryRowContext(ctx, `
+	err := r.db.QueryRowContext(ctx, `
 SELECT status, retry_count, max_retry
 FROM async_tasks
-WHERE task_id = ?
-FOR UPDATE
-`, taskID).Scan(&status, &retryCount, &maxRetry)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return ErrTaskNotFound
-			}
-			return fmt.Errorf("query task for retry: %w", err)
-		}
-		if status != StatusRunning {
-			return nil
-		}
-		retryCount++
-		now := time.Now().UTC()
-		if retryCount >= maxRetry {
-			dead = true
-			_, err = tx.ExecContext(ctx, `
-UPDATE async_tasks
-SET status = ?, retry_count = ?, next_retry_at = NULL, last_error = ?, updated_at = ?
-WHERE task_id = ?
-`, StatusDead, retryCount, truncate(lastErr, 255), now, taskID)
-			if err != nil {
-				return fmt.Errorf("mark task dead: %w", err)
-			}
-			return nil
-		}
-
-		delay := taskBackoff(retryCount, backoffBase)
-		next := now.Add(delay)
-		nextRetry = &next
-		_, err = tx.ExecContext(ctx, `
-UPDATE async_tasks
-SET status = ?, retry_count = ?, next_retry_at = ?, last_error = ?, updated_at = ?
-WHERE task_id = ?
-`, StatusFailed, retryCount, next, truncate(lastErr, 255), now, taskID)
-		if err != nil {
-			return fmt.Errorf("mark task retry: %w", err)
-		}
-		return nil
-	})
+WHERE task_id = ? AND version = ?
+LIMIT 1
+`, taskID, expectedVersion).Scan(&status, &retryCount, &maxRetry)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil, ErrTaskVersionConflict
+		}
+		return false, nil, fmt.Errorf("query task for retry: %w", err)
+	}
+	if status != StatusRunning {
+		return false, nil, ErrTaskVersionConflict
+	}
+
+	retryCount++
+	now := time.Now().UTC()
+	if retryCount >= maxRetry {
+		res, execErr := r.db.ExecContext(ctx, `
+UPDATE async_tasks
+SET status = ?, retry_count = ?, next_retry_at = NULL, last_error = ?, version = version + 1, updated_at = ?
+WHERE task_id = ? AND status = ? AND version = ?
+`, StatusDead, retryCount, truncate(lastErr, 255), now, taskID, StatusRunning, expectedVersion)
+		if execErr != nil {
+			return false, nil, fmt.Errorf("mark task dead: %w", execErr)
+		}
+		if err := taskCASResult(res, "mark task dead"); err != nil {
+			return false, nil, err
+		}
+		return true, nil, nil
+	}
+
+	delay := taskBackoff(retryCount, backoffBase)
+	next := now.Add(delay)
+	res, execErr := r.db.ExecContext(ctx, `
+UPDATE async_tasks
+SET status = ?, retry_count = ?, next_retry_at = ?, last_error = ?, version = version + 1, updated_at = ?
+WHERE task_id = ? AND status = ? AND version = ?
+`, StatusFailed, retryCount, next, truncate(lastErr, 255), now, taskID, StatusRunning, expectedVersion)
+	if execErr != nil {
+		return false, nil, fmt.Errorf("mark task retry: %w", execErr)
+	}
+	if err := taskCASResult(res, "mark task retry"); err != nil {
 		return false, nil, err
 	}
-	return dead, nextRetry, nil
+	return false, &next, nil
 }
 
-func (r *Repository) MarkRecoveredForRetry(ctx context.Context, taskID int64, lastErr string) (bool, error) {
+func (r *Repository) MarkRecoveredForRetry(ctx context.Context, taskID int64, expectedVersion int64, lastErr string) (bool, error) {
 	now := time.Now().UTC()
 	res, err := r.db.ExecContext(ctx, `
 UPDATE async_tasks
-SET status = ?, next_retry_at = ?, last_error = ?, updated_at = ?
-WHERE task_id = ? AND status IN (?, ?)
-`, StatusFailed, now, truncate(lastErr, 255), now, taskID, StatusRunning, StatusSuspended)
+SET status = ?, next_retry_at = ?, last_error = ?, version = version + 1, updated_at = ?
+WHERE task_id = ? AND status IN (?, ?) AND version = ?
+`, StatusFailed, now, truncate(lastErr, 255), now, taskID, StatusRunning, StatusSuspended, expectedVersion)
 	if err != nil {
 		return false, fmt.Errorf("mark task recovered for retry: %w", err)
 	}
@@ -173,4 +172,15 @@ WHERE task_id = ? AND status IN (?, ?)
 		return false, fmt.Errorf("mark task recovered for retry rows affected: %w", err)
 	}
 	return affected > 0, nil
+}
+
+func taskCASResult(res sql.Result, action string) error {
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s rows affected: %w", action, err)
+	}
+	if affected == 0 {
+		return ErrTaskVersionConflict
+	}
+	return nil
 }

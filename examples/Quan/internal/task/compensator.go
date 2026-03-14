@@ -45,7 +45,7 @@ type compensationRepository interface {
 	ListDueFailedForCompensation(ctx context.Context, limit int) ([]RecoveryCandidate, error)
 	ListSuspendedForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]RecoveryCandidate, error)
 	ListStaleRunningForCompensation(ctx context.Context, staleBefore time.Time, limit int) ([]RecoveryCandidate, error)
-	MarkRecoveredForRetry(ctx context.Context, taskID int64, lastErr string) (bool, error)
+	MarkRecoveredForRetry(ctx context.Context, taskID int64, expectedVersion int64, lastErr string) (bool, error)
 }
 
 type compensationQueue interface {
@@ -145,7 +145,7 @@ func (c *Compensator) compensateOnce(ctx context.Context) error {
 	}
 
 	for _, candidate := range staleRunningCandidates {
-		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, candidate.TaskID, "stale RUNNING recovered for retry")
+		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, candidate.TaskID, candidate.Version, "stale RUNNING recovered for retry")
 		if recoverErr != nil {
 			applog.L(ctx).Warn("recover stale running task failed", zap.Int64("task_id", candidate.TaskID), zap.Error(recoverErr))
 			continue
@@ -155,7 +155,7 @@ func (c *Compensator) compensateOnce(ctx context.Context) error {
 		}
 	}
 	for _, candidate := range suspendedCandidates {
-		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, candidate.TaskID, "suspended task recovered for retry")
+		ok, recoverErr := c.repo.MarkRecoveredForRetry(ctx, candidate.TaskID, candidate.Version, "suspended task recovered for retry")
 		if recoverErr != nil {
 			applog.L(ctx).Warn("recover suspended task failed", zap.Int64("task_id", candidate.TaskID), zap.Error(recoverErr))
 			continue

@@ -14,7 +14,7 @@ type taskRow interface {
 func (r *Repository) GetByID(ctx context.Context, taskID int64) (AsyncTask, error) {
 	return scanTask(
 		r.db.QueryRowContext(ctx, `
-SELECT task_id, task_type, biz_id, status, payload_json, retry_count, max_retry, next_retry_at, last_error, created_at, updated_at
+SELECT task_id, task_type, biz_id, status, payload_json, retry_count, max_retry, next_retry_at, last_error, version, created_at, updated_at
 FROM async_tasks
 WHERE task_id = ?
 LIMIT 1
@@ -25,7 +25,7 @@ LIMIT 1
 func (r *Repository) GetByTypeBiz(ctx context.Context, taskType, bizID string) (AsyncTask, error) {
 	return scanTask(
 		r.db.QueryRowContext(ctx, `
-SELECT task_id, task_type, biz_id, status, payload_json, retry_count, max_retry, next_retry_at, last_error, created_at, updated_at
+SELECT task_id, task_type, biz_id, status, payload_json, retry_count, max_retry, next_retry_at, last_error, version, created_at, updated_at
 FROM async_tasks
 WHERE task_type = ? AND biz_id = ?
 LIMIT 1
@@ -38,7 +38,7 @@ func (r *Repository) ListDueFailedForCompensation(ctx context.Context, limit int
 		limit = 100
 	}
 	rows, err := r.db.QueryContext(ctx, `
-SELECT task_id, next_retry_at
+SELECT task_id, next_retry_at, version
 FROM async_tasks
 WHERE status = ? AND next_retry_at IS NOT NULL AND next_retry_at <= ?
 ORDER BY next_retry_at ASC
@@ -57,7 +57,7 @@ func (r *Repository) ListSuspendedForCompensation(ctx context.Context, staleBefo
 		limit = 100
 	}
 	rows, err := r.db.QueryContext(ctx, `
-SELECT task_id, updated_at
+SELECT task_id, updated_at, version
 FROM async_tasks
 WHERE status = ? AND updated_at <= ?
 ORDER BY updated_at ASC
@@ -76,7 +76,7 @@ func (r *Repository) ListStaleRunningForCompensation(ctx context.Context, staleB
 		limit = 100
 	}
 	rows, err := r.db.QueryContext(ctx, `
-SELECT task_id, updated_at
+SELECT task_id, updated_at, version
 FROM async_tasks
 WHERE status = ? AND updated_at <= ?
 ORDER BY updated_at ASC
@@ -94,7 +94,7 @@ func scanRecoveryCandidates(rows *sql.Rows, limit int, source string, label stri
 	result := make([]RecoveryCandidate, 0, limit)
 	for rows.Next() {
 		var candidate RecoveryCandidate
-		if scanErr := rows.Scan(&candidate.TaskID, &candidate.RecoverAt); scanErr != nil {
+		if scanErr := rows.Scan(&candidate.TaskID, &candidate.RecoverAt, &candidate.Version); scanErr != nil {
 			return nil, fmt.Errorf("scan %s task id: %w", label, scanErr)
 		}
 		candidate.Source = source
@@ -121,6 +121,7 @@ func scanTask(row taskRow) (AsyncTask, error) {
 		&t.MaxRetry,
 		&nextAt,
 		&t.LastError,
+		&t.Version,
 		&t.CreatedAt,
 		&t.UpdatedAt,
 	)

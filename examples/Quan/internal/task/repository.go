@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	ErrTaskDuplicate     = errors.New("task duplicate")
-	ErrTaskNotFound      = errors.New("task not found")
-	ErrTaskNotReplayable = errors.New("task not replayable")
+	ErrTaskDuplicate       = errors.New("task duplicate")
+	ErrTaskNotFound        = errors.New("task not found")
+	ErrTaskNotReplayable   = errors.New("task not replayable")
+	ErrTaskVersionConflict = errors.New("task version conflict")
 )
 
 type Repository struct {

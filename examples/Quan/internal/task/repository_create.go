@@ -14,9 +14,9 @@ func (r *Repository) CreateTx(ctx context.Context, tx *sql.Tx, p CreateTaskParam
 	now := time.Now().UTC()
 	res, err := tx.ExecContext(ctx, `
 INSERT INTO async_tasks
-	(task_type, biz_id, status, payload_json, retry_count, max_retry, next_retry_at, last_error, created_at, updated_at)
+	(task_type, biz_id, status, payload_json, retry_count, max_retry, next_retry_at, last_error, version, created_at, updated_at)
 VALUES
-	(?, ?, ?, ?, 0, ?, NULL, '', ?, ?)
+	(?, ?, ?, ?, 0, ?, NULL, '', 0, ?, ?)
 `, p.TaskType, p.BizID, StatusPending, p.Payload, p.MaxRetry, now, now)
 	if err != nil {
 		if isDuplicateKey(err) {
@@ -36,6 +36,7 @@ VALUES
 		Payload:    p.Payload,
 		RetryCount: 0,
 		MaxRetry:   p.MaxRetry,
+		Version:    0,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}, nil

@@ -142,6 +142,19 @@ func countPendingOutbox(t *testing.T, db *sql.DB) int64 {
 	return cnt
 }
 
+func countConsumeReceipts(t *testing.T, db *sql.DB, taskType, bizID string) int64 {
+	t.Helper()
+	var cnt int64
+	if err := db.QueryRow(`
+SELECT COUNT(1)
+FROM task_consume_receipts
+WHERE task_type = ? AND biz_id = ?
+`, taskType, bizID).Scan(&cnt); err != nil {
+		t.Fatalf("count consume receipts failed: %v", err)
+	}
+	return cnt
+}
+
 func redisDLQLen(t *testing.T, q *Queue) int64 {
 	t.Helper()
 	n, err := q.rdb.LLen(context.Background(), q.cfg.DLQKey).Result()
@@ -189,6 +202,9 @@ func openTaskIntegrationDB(t *testing.T) *sql.DB {
 		t.Fatalf("run migrations failed: %v", err)
 	}
 
+	if _, err := db.Exec(`DELETE FROM task_consume_receipts`); err != nil {
+		t.Fatalf("cleanup task_consume_receipts failed: %v", err)
+	}
 	if _, err := db.Exec(`DELETE FROM async_tasks`); err != nil {
 		t.Fatalf("cleanup async_tasks failed: %v", err)
 	}

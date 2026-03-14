@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -56,9 +57,9 @@ type Consumer struct {
 
 type consumerRepository interface {
 	TryMarkRunning(ctx context.Context, taskID int64) (AsyncTask, bool, error)
-	MarkFailed(ctx context.Context, taskID int64, lastErr string, backoffBase time.Duration) (bool, *time.Time, error)
-	MarkSuccess(ctx context.Context, taskID int64) error
-	MarkSuspended(ctx context.Context, taskID int64, lastErr string) error
+	MarkFailed(ctx context.Context, taskID int64, expectedVersion int64, lastErr string, backoffBase time.Duration) (bool, *time.Time, error)
+	MarkSuccess(ctx context.Context, taskID int64, expectedVersion int64) error
+	MarkSuspended(ctx context.Context, taskID int64, expectedVersion int64, lastErr string) error
 }
 
 type consumerQueue interface {
@@ -201,8 +202,12 @@ func (c *Consumer) consumeTask(ctx context.Context, taskID int64, workerID int) 
 
 	if err := c.registry.Handle(ctx, task); err != nil {
 		c.metrics.IncConsumeFailure()
-		dead, nextRetry, markErr := c.repo.MarkFailed(ctx, task.ID, err.Error(), c.cfg.RetryBackoff)
+		dead, nextRetry, markErr := c.repo.MarkFailed(ctx, task.ID, task.Version, err.Error(), c.cfg.RetryBackoff)
 		if markErr != nil {
+			if errors.Is(markErr, ErrTaskVersionConflict) {
+				applog.L(ctx).Warn("skip failed transition due to task version conflict", zap.Int("worker_id", workerID), zap.Int64("task_id", task.ID), zap.Int64("version", task.Version))
+				return nil
+			}
 			return markErr
 		}
 		if dead {
@@ -222,9 +227,17 @@ func (c *Consumer) consumeTask(ctx context.Context, taskID int64, workerID int) 
 		return nil
 	}
 
-	if err := c.repo.MarkSuccess(ctx, task.ID); err != nil {
-		suspendErr := c.repo.MarkSuspended(ctx, task.ID, "handler succeeded but mark success failed: "+err.Error())
+	if err := c.repo.MarkSuccess(ctx, task.ID, task.Version); err != nil {
+		if errors.Is(err, ErrTaskVersionConflict) {
+			applog.L(ctx).Warn("skip success transition due to task version conflict", zap.Int("worker_id", workerID), zap.Int64("task_id", task.ID), zap.Int64("version", task.Version))
+			return nil
+		}
+		suspendErr := c.repo.MarkSuspended(ctx, task.ID, task.Version, "handler succeeded but mark success failed: "+err.Error())
 		if suspendErr != nil {
+			if errors.Is(suspendErr, ErrTaskVersionConflict) {
+				applog.L(ctx).Warn("skip suspend fallback due to task version conflict", zap.Int("worker_id", workerID), zap.Int64("task_id", task.ID), zap.Int64("version", task.Version))
+				return nil
+			}
 			return fmt.Errorf("mark task success failed: %w; suspend fallback failed: %v", err, suspendErr)
 		}
 		return err

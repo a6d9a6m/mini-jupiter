@@ -37,7 +37,7 @@ func (f *fakeConsumerRepo) TryMarkRunning(_ context.Context, taskID int64) (Asyn
 	return f.tryTask, f.tryOK, f.tryErr
 }
 
-func (f *fakeConsumerRepo) MarkFailed(_ context.Context, taskID int64, _ string, _ time.Duration) (bool, *time.Time, error) {
+func (f *fakeConsumerRepo) MarkFailed(_ context.Context, taskID int64, _ int64, _ string, _ time.Duration) (bool, *time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.markFailedCalls++
@@ -47,14 +47,14 @@ func (f *fakeConsumerRepo) MarkFailed(_ context.Context, taskID int64, _ string,
 	return f.markFailedDead, f.markFailedNext, f.markFailedErr
 }
 
-func (f *fakeConsumerRepo) MarkSuccess(_ context.Context, taskID int64) error {
+func (f *fakeConsumerRepo) MarkSuccess(_ context.Context, taskID int64, _ int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.markSuccessIDs = append(f.markSuccessIDs, taskID)
 	return f.markSuccessErr
 }
 
-func (f *fakeConsumerRepo) MarkSuspended(_ context.Context, taskID int64, _ string) error {
+func (f *fakeConsumerRepo) MarkSuspended(_ context.Context, taskID int64, _ int64, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.markSuspendIDs = append(f.markSuspendIDs, taskID)
@@ -266,5 +266,28 @@ func TestConsumeTaskSuccessMarkSuccessFailureSuspendsTask(t *testing.T) {
 	}
 	if len(repo.markSuspendIDs) != 1 || repo.markSuspendIDs[0] != 505 {
 		t.Fatalf("expected mark suspended once for task 505, got %+v", repo.markSuspendIDs)
+	}
+}
+
+func TestConsumeTaskSuccessVersionConflictDoesNotSuspend(t *testing.T) {
+	repo := &fakeConsumerRepo{
+		tryTask:        AsyncTask{ID: 606, TaskType: TaskTypeSendCouponNotice, Version: 7},
+		tryOK:          true,
+		markSuccessErr: ErrTaskVersionConflict,
+	}
+	queue := &fakeConsumerQueue{}
+	registry := NewHandlerRegistry()
+	registry.Register(TaskTypeSendCouponNotice, &fakeHandler{})
+
+	c, err := NewConsumer(repo, queue, registry, ConsumeConfig{Enabled: true})
+	if err != nil {
+		t.Fatalf("new consumer failed: %v", err)
+	}
+
+	if err := c.consumeTask(context.Background(), 606, 1); err != nil {
+		t.Fatalf("expected version conflict to be treated as noop, got %v", err)
+	}
+	if len(repo.markSuspendIDs) != 0 {
+		t.Fatalf("expected no suspend fallback on version conflict, got %+v", repo.markSuspendIDs)
 	}
 }

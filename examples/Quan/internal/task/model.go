@@ -28,6 +28,7 @@ type AsyncTask struct {
 	MaxRetry   int
 	NextRetry  *time.Time
 	LastError  string
+	Version    int64
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
@@ -49,6 +50,7 @@ type RecoveryCandidate struct {
 	TaskID    int64
 	Source    string
 	RecoverAt time.Time
+	Version   int64
 }
 
 type SendCouponNoticePayload struct {

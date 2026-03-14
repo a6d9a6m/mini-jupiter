@@ -39,10 +39,15 @@ func (r *HandlerRegistry) Handle(ctx context.Context, task AsyncTask) error {
 	return h.Handle(ctx, task)
 }
 
-type SendCouponNoticeHandler struct{}
+type SendCouponNoticeHandler struct {
+	receipts consumeReceiptStore
+}
 
-func NewSendCouponNoticeHandler() *SendCouponNoticeHandler {
-	return &SendCouponNoticeHandler{}
+func NewSendCouponNoticeHandler(receipts consumeReceiptStore) *SendCouponNoticeHandler {
+	if receipts == nil {
+		receipts = noopConsumeReceiptStore{}
+	}
+	return &SendCouponNoticeHandler{receipts: receipts}
 }
 
 func (h *SendCouponNoticeHandler) Handle(ctx context.Context, task AsyncTask) error {
@@ -52,6 +57,17 @@ func (h *SendCouponNoticeHandler) Handle(ctx context.Context, task AsyncTask) er
 	}
 	if payload.TraceID != "" {
 		ctx = applog.WithTraceID(ctx, payload.TraceID)
+	}
+	created, err := h.receipts.TryCreate(ctx, task)
+	if err != nil {
+		return fmt.Errorf("record SEND_COUPON_NOTICE consume receipt: %w", err)
+	}
+	if !created {
+		applog.L(ctx).Info("coupon notice task deduplicated",
+			zap.Int64("task_id", task.ID),
+			zap.String("biz_id", task.BizID),
+		)
+		return nil
 	}
 	applog.L(ctx).Info("coupon notice task consumed",
 		zap.Int64("task_id", task.ID),

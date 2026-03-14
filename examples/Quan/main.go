@@ -38,7 +38,9 @@ type AppConfig struct {
 	Migration mysql.MigrationConfig `mapstructure:"migration" yaml:"migration"`
 	Coupon    struct {
 		Claim struct {
-			IdempotencyTTL time.Duration `mapstructure:"idempotency_ttl" yaml:"idempotency_ttl"`
+			IdempotencyTTL       time.Duration                      `mapstructure:"idempotency_ttl" yaml:"idempotency_ttl"`
+			ReservationReconcile coupon.ReservationReconcilerConfig `mapstructure:"reservation_reconcile" yaml:"reservation_reconcile"`
+			SideEffectDispatch   coupon.SideEffectDispatchConfig    `mapstructure:"side_effect_dispatch" yaml:"side_effect_dispatch"`
 		} `mapstructure:"claim" yaml:"claim"`
 	} `mapstructure:"coupon" yaml:"coupon"`
 	Task struct {
@@ -86,6 +88,8 @@ func main() {
 
 	outboxRepo := outbox.NewRepository(mysqlComp.Client().Raw())
 	taskRepo := task.NewRepository(mysqlComp.Client().Raw(), txm)
+	taskConsumeReceiptRepo := task.NewConsumeReceiptRepository(mysqlComp.Client().Raw())
+	sideEffectRepo := coupon.NewSideEffectRepository(mysqlComp.Client().Raw())
 
 	var redisComp *redis.Component
 	if cfg.Redis.Enabled {
@@ -99,24 +103,32 @@ func main() {
 	repo := coupon.NewRepository(
 		mysqlComp.Client().Raw(),
 		txm,
-		taskRepo,
-		outboxRepo,
-		cfg.Task.Consume.DefaultMaxRetry,
+		sideEffectRepo,
 	)
 	var redisClient *redis.Client
+	var adjudicator *coupon.Adjudicator
 	if redisComp != nil {
 		redisClient = redisComp.Client()
+		adjudicator = coupon.NewAdjudicator(redisClient)
 	}
-	svc := coupon.NewService(repo, redisClient, cfg.Coupon.Claim.IdempotencyTTL)
+	svc := coupon.NewServiceWithAdjudicator(repo, adjudicator, cfg.Coupon.Claim.IdempotencyTTL)
 	handler := coupon.NewHandler(svc)
 
 	var (
-		taskQueue      *task.Queue
-		relayComp      *outbox.Relay
-		consumer       *task.Consumer
-		taskCompensate *task.Compensator
+		taskQueue             *task.Queue
+		relayComp             *outbox.Relay
+		consumer              *task.Consumer
+		taskCompensate        *task.Compensator
+		reservationReconciler *coupon.ReservationReconciler
+		sideEffectDispatcher  *coupon.SideEffectDispatcher
 	)
 	if redisClient != nil {
+		reconciler, err := coupon.NewReservationReconciler(repo, adjudicator, cfg.Coupon.Claim.ReservationReconcile)
+		if err != nil {
+			applog.L(context.Background()).Fatal("coupon reservation reconciler init failed", zap.Error(err))
+		}
+		reservationReconciler = reconciler
+
 		q, err := task.NewQueue(redisClient, cfg.Task.Queue)
 		if err != nil {
 			applog.L(context.Background()).Fatal("task queue init failed", zap.Error(err))
@@ -130,7 +142,7 @@ func main() {
 		relayComp = relay
 
 		registry := task.NewHandlerRegistry()
-		registry.Register(task.TaskTypeSendCouponNotice, task.NewSendCouponNoticeHandler())
+		registry.Register(task.TaskTypeSendCouponNotice, task.NewSendCouponNoticeHandler(taskConsumeReceiptRepo))
 		c, err := task.NewConsumer(taskRepo, taskQueue, registry, cfg.Task.Consume)
 		if err != nil {
 			applog.L(context.Background()).Fatal("task consumer init failed", zap.Error(err))
@@ -143,6 +155,12 @@ func main() {
 		}
 		taskCompensate = compensator
 	}
+
+	dispatcher, err := coupon.NewSideEffectDispatcher(sideEffectRepo, taskRepo, outboxRepo, cfg.Coupon.Claim.SideEffectDispatch)
+	if err != nil {
+		applog.L(context.Background()).Fatal("coupon side effect dispatcher init failed", zap.Error(err))
+	}
+	sideEffectDispatcher = dispatcher
 
 	taskService := task.NewServiceWithQueue(txm, taskRepo, outboxRepo, taskQueue, cfg.Task.Consume.DefaultMaxRetry)
 	taskHTTPHandler := task.NewHTTPHandler(taskService)
@@ -213,6 +231,12 @@ func main() {
 	}
 	if taskCompensate != nil {
 		app.Use(taskCompensate)
+	}
+	if reservationReconciler != nil {
+		app.Use(reservationReconciler)
+	}
+	if sideEffectDispatcher != nil {
+		app.Use(sideEffectDispatcher)
 	}
 	app.Use(&httpComponent{server: server})
 

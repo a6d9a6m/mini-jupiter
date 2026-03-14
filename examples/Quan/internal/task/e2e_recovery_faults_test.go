@@ -119,19 +119,19 @@ func (r *injectedTaskRepo) TryMarkRunning(ctx context.Context, taskID int64) (As
 	return r.inner.TryMarkRunning(ctx, taskID)
 }
 
-func (r *injectedTaskRepo) MarkFailed(ctx context.Context, taskID int64, lastErr string, backoffBase time.Duration) (bool, *time.Time, error) {
-	return r.inner.MarkFailed(ctx, taskID, lastErr, backoffBase)
+func (r *injectedTaskRepo) MarkFailed(ctx context.Context, taskID int64, expectedVersion int64, lastErr string, backoffBase time.Duration) (bool, *time.Time, error) {
+	return r.inner.MarkFailed(ctx, taskID, expectedVersion, lastErr, backoffBase)
 }
 
-func (r *injectedTaskRepo) MarkSuccess(ctx context.Context, taskID int64) error {
+func (r *injectedTaskRepo) MarkSuccess(ctx context.Context, taskID int64, expectedVersion int64) error {
 	if err := r.markSuccessFault.Fail(); err != nil {
 		return err
 	}
-	return r.inner.MarkSuccess(ctx, taskID)
+	return r.inner.MarkSuccess(ctx, taskID, expectedVersion)
 }
 
-func (r *injectedTaskRepo) MarkSuspended(ctx context.Context, taskID int64, lastErr string) error {
-	return r.inner.MarkSuspended(ctx, taskID, lastErr)
+func (r *injectedTaskRepo) MarkSuspended(ctx context.Context, taskID int64, expectedVersion int64, lastErr string) error {
+	return r.inner.MarkSuspended(ctx, taskID, expectedVersion, lastErr)
 }
 
 func (r *injectedTaskRepo) ListDueFailedForCompensation(ctx context.Context, limit int) ([]RecoveryCandidate, error) {
@@ -146,8 +146,8 @@ func (r *injectedTaskRepo) ListStaleRunningForCompensation(ctx context.Context, 
 	return r.inner.ListStaleRunningForCompensation(ctx, staleBefore, limit)
 }
 
-func (r *injectedTaskRepo) MarkRecoveredForRetry(ctx context.Context, taskID int64, lastErr string) (bool, error) {
-	return r.inner.MarkRecoveredForRetry(ctx, taskID, lastErr)
+func (r *injectedTaskRepo) MarkRecoveredForRetry(ctx context.Context, taskID int64, expectedVersion int64, lastErr string) (bool, error) {
+	return r.inner.MarkRecoveredForRetry(ctx, taskID, expectedVersion, lastErr)
 }
 
 type deterministicFault struct {
