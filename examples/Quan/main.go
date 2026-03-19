@@ -7,9 +7,14 @@ import (
 	"os"
 	"time"
 
-	"mini-jupiter/examples/Quan/internal/coupon"
+	"mini-jupiter/examples/Quan/internal/adjudication/hotpath"
+	"mini-jupiter/examples/Quan/internal/adjudication/reservation"
+	claimapi "mini-jupiter/examples/Quan/internal/api/claim"
+	taskapi "mini-jupiter/examples/Quan/internal/api/task"
+	"mini-jupiter/examples/Quan/internal/claim"
 	"mini-jupiter/examples/Quan/internal/observability"
 	"mini-jupiter/examples/Quan/internal/outbox"
+	"mini-jupiter/examples/Quan/internal/sideeffect"
 	"mini-jupiter/examples/Quan/internal/task"
 	"mini-jupiter/internal/middleware"
 	"mini-jupiter/pkg/config"
@@ -38,9 +43,9 @@ type AppConfig struct {
 	Migration mysql.MigrationConfig `mapstructure:"migration" yaml:"migration"`
 	Coupon    struct {
 		Claim struct {
-			IdempotencyTTL       time.Duration                      `mapstructure:"idempotency_ttl" yaml:"idempotency_ttl"`
-			ReservationReconcile coupon.ReservationReconcilerConfig `mapstructure:"reservation_reconcile" yaml:"reservation_reconcile"`
-			SideEffectDispatch   coupon.SideEffectDispatchConfig    `mapstructure:"side_effect_dispatch" yaml:"side_effect_dispatch"`
+			IdempotencyTTL       time.Duration                           `mapstructure:"idempotency_ttl" yaml:"idempotency_ttl"`
+			ReservationReconcile reservation.ReservationReconcilerConfig `mapstructure:"reservation_reconcile" yaml:"reservation_reconcile"`
+			SideEffectDispatch   sideeffect.DispatchConfig               `mapstructure:"side_effect_dispatch" yaml:"side_effect_dispatch"`
 		} `mapstructure:"claim" yaml:"claim"`
 	} `mapstructure:"coupon" yaml:"coupon"`
 	Task struct {
@@ -89,7 +94,7 @@ func main() {
 	outboxRepo := outbox.NewRepository(mysqlComp.Client().Raw())
 	taskRepo := task.NewRepository(mysqlComp.Client().Raw(), txm)
 	taskConsumeReceiptRepo := task.NewConsumeReceiptRepository(mysqlComp.Client().Raw())
-	sideEffectRepo := coupon.NewSideEffectRepository(mysqlComp.Client().Raw())
+	sideEffectRepo := sideeffect.NewRepository(mysqlComp.Client().Raw())
 
 	var redisComp *redis.Component
 	if cfg.Redis.Enabled {
@@ -100,30 +105,30 @@ func main() {
 		redisComp = c
 	}
 
-	repo := coupon.NewRepository(
+	repo := claim.NewRepository(
 		mysqlComp.Client().Raw(),
 		txm,
 		sideEffectRepo,
 	)
 	var redisClient *redis.Client
-	var adjudicator *coupon.Adjudicator
+	var adjudicator *hotpath.Adjudicator
 	if redisComp != nil {
 		redisClient = redisComp.Client()
-		adjudicator = coupon.NewAdjudicator(redisClient)
+		adjudicator = hotpath.NewAdjudicator(redisClient)
 	}
-	svc := coupon.NewServiceWithAdjudicator(repo, adjudicator, cfg.Coupon.Claim.IdempotencyTTL)
-	handler := coupon.NewHandler(svc)
+	svc := claim.NewServiceWithAdjudicator(repo, adjudicator, cfg.Coupon.Claim.IdempotencyTTL)
+	claimHandler := claimapi.NewHandler(svc)
 
 	var (
 		taskQueue             *task.Queue
 		relayComp             *outbox.Relay
 		consumer              *task.Consumer
 		taskCompensate        *task.Compensator
-		reservationReconciler *coupon.ReservationReconciler
-		sideEffectDispatcher  *coupon.SideEffectDispatcher
+		reservationReconciler *reservation.ReservationReconciler
+		sideEffectDispatcher  *sideeffect.Dispatcher
 	)
 	if redisClient != nil {
-		reconciler, err := coupon.NewReservationReconciler(repo, adjudicator, cfg.Coupon.Claim.ReservationReconcile)
+		reconciler, err := reservation.NewReservationReconciler(repo, adjudicator, cfg.Coupon.Claim.ReservationReconcile)
 		if err != nil {
 			applog.L(context.Background()).Fatal("coupon reservation reconciler init failed", zap.Error(err))
 		}
@@ -156,14 +161,14 @@ func main() {
 		taskCompensate = compensator
 	}
 
-	dispatcher, err := coupon.NewSideEffectDispatcher(sideEffectRepo, taskRepo, outboxRepo, cfg.Coupon.Claim.SideEffectDispatch)
+	dispatcher, err := sideeffect.NewDispatcher(sideEffectRepo, taskRepo, outboxRepo, cfg.Coupon.Claim.SideEffectDispatch)
 	if err != nil {
 		applog.L(context.Background()).Fatal("coupon side effect dispatcher init failed", zap.Error(err))
 	}
 	sideEffectDispatcher = dispatcher
 
 	taskService := task.NewServiceWithQueue(txm, taskRepo, outboxRepo, taskQueue, cfg.Task.Consume.DefaultMaxRetry)
-	taskHTTPHandler := task.NewHTTPHandler(taskService)
+	taskHandler := taskapi.NewHandler(taskService)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) {
@@ -183,10 +188,10 @@ func main() {
 			metricPath = "/metrics"
 		}
 		mux.Handle(metricPath, quanMetrics.Handler())
-		handler.SetMetrics(quanMetrics)
+		claimHandler.SetMetrics(quanMetrics)
 	}
-	handler.Register(mux)
-	taskHTTPHandler.Register(mux)
+	claimHandler.Register(mux)
+	taskHandler.Register(mux)
 	if quanMetrics != nil {
 		if relayComp != nil {
 			relayComp.SetMetrics(quanMetrics)
