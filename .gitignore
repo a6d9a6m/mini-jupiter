@@ -6,6 +6,7 @@ codex/
 .gocache/
 CODEX_EXEC_CONTEXT.md
 LOCAL_HARDCORE_PROJECT_PLAN.md
+examples/Quan/plan/
 examples/Quan/01-overview.md
 examples/Quan/02-api.md
 examples/Quan/03-domain-model.md

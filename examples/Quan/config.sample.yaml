@@ -42,6 +42,17 @@ migration:
 coupon:
   claim:
     idempotency_ttl: "24h"
+    reservation_reconcile:
+      enabled: true
+      poll_interval: "2s"
+      batch_size: 100
+    side_effect_dispatch:
+      enabled: true
+      poll_interval: "2s"
+      batch_size: 100
+      stale_timeout: "30s"
+      retry_delay: "3s"
+      max_retry: 10
     default_per_user_limit: 1
 
 task:

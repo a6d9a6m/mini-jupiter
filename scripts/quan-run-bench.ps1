@@ -1,6 +1,7 @@
 param(
     [string]$ConfigPath = "examples/Quan/config.sample.yaml",
     [string]$BaseUrl = "http://127.0.0.1:8081",
+    [string]$RedisAddr = "127.0.0.1:6379",
     [int]$Port = 8081,
     [string]$PingPath = "/ping",
     [string]$MySQLDsn = "root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4",
@@ -87,6 +88,7 @@ try {
 
     go run ./examples/Quan/bench/cmd/benchprep `
         -dsn $MySQLDsn `
+        -redis-addr $RedisAddr `
         -coupon-id $CouponId `
         -stock $Stock `
         -per-user-limit $PerUserLimit `

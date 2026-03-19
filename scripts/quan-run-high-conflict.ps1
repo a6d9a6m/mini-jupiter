@@ -8,6 +8,7 @@ param(
     [string]$ConfigPath = "examples/Quan/config.sample.yaml",
     [string]$BaseUrl = "http://127.0.0.1:8081",
     [string]$MySQLDsn = "root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4",
+    [string]$RedisAddr = "127.0.0.1:6379",
     [string]$ReportOut = "",
     [string]$AuditOut = "",
     [string]$SummaryOut = "",
@@ -42,6 +43,7 @@ $auditScript = Join-Path $PSScriptRoot "quan-audit-ledger.ps1"
 & $benchScript `
     -ConfigPath $ConfigPath `
     -BaseUrl $BaseUrl `
+    -RedisAddr $RedisAddr `
     -Scenario "high_conflict" `
     -CouponId $CouponId `
     -Stock $Stock `
