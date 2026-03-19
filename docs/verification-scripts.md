@@ -1,6 +1,6 @@
 # Verification Scripts
 
-Three script entry points cover the evidence the Quan project needs most.
+Five script entry points cover the evidence the Quan project needs most.
 
 Run them serially, not in parallel, because they share the same local MySQL,
 Redis, and Quan HTTP port.
@@ -59,7 +59,31 @@ Representative heavy sample:
 - `60` concurrency
 - stock pressure fixed at the configured campaign stock
 
-## 2. Ledger Consistency Audit
+## 2. Skewed-Conflict Benchmark
+
+Script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-skewed-conflict.ps1 `
+  -TotalRequests 10000 `
+  -TierSpec "2x2500,10x200,3000x1"
+```
+
+Purpose:
+
+- validate correctness when request demand is heavily concentrated on a small
+  user subset
+- measure latency and transport behavior under a non-uniform user distribution
+- verify no oversell, no per-user overflow, and no success-vs-ledger drift
+
+Outputs:
+
+- `vegeta` binary result
+- `vegeta` JSON report
+- ledger audit JSON
+- combined summary JSON with per-tier request distribution
+
+## 3. Ledger Consistency Audit
 
 Script:
 
@@ -80,7 +104,7 @@ Checks:
 - available stock delta
 - benchmark success count vs persisted claim count
 
-## 3. Fault Injection And Recovery
+## 4. Fault Injection And Recovery
 
 Script:
 
@@ -112,3 +136,10 @@ Outputs:
 - per-run pass/failure records
 - per-scenario aggregate pass rate
 - total sample count and average recovery time
+
+Boundary:
+
+- the fault-recovery script covers relay, consumer, compensator, and DLQ
+  recovery paths
+- side-effect dispatcher and reservation reconciler recovery are validated by
+  focused coupon package tests rather than this script

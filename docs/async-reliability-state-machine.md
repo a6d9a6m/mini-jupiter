@@ -4,13 +4,46 @@
 
 Phase 2 makes the async path explicit for:
 
+- `claim_side_effects`
 - `outbox_events`
 - `async_tasks`
+- side-effect dispatcher
 - relay
 - consumer
 - compensator
 
 The delivery contract is `at-least-once`, not `exactly-once`.
+
+## Claim Side-Effect State Machine
+
+### States
+
+- `PENDING`: claim committed and follow-up work still needs to be created
+- `PROCESSING`: dispatcher claimed the side effect and is creating downstream
+  records
+- `DONE`: required task and outbox records were durably created
+- `SUSPENDED`: dispatcher exhausted retry budget or the payload is not safe to
+  keep retrying
+
+### Transitions
+
+- `PENDING -> PROCESSING`
+  Trigger: dispatcher claims the side effect with `TryMarkProcessing`
+- `PROCESSING -> DONE`
+  Trigger: task and outbox rows are created and `MarkDone` succeeds
+- `PROCESSING -> PENDING`
+  Trigger: dispatcher fails and schedules retry metadata
+- `PROCESSING -> SUSPENDED`
+  Trigger: retry budget is exhausted or payload is not safe to keep retrying
+- `PROCESSING -> PENDING`
+  Trigger: stale processing recovery scan reopens a stuck record
+
+### Notes
+
+- Dispatcher scans are best-effort per item; one mark/retry/suspend failure does
+  not stop later side effects in the same batch.
+- Duplicate-safe redispatch relies on idempotent downstream creation plus
+  duplicate checks on task/outbox materialization.
 
 ## Task State Machine
 
@@ -82,20 +115,30 @@ The delivery contract is `at-least-once`, not `exactly-once`.
 - Recovery reopens stale `DISPATCHING` events to `PENDING`.
 - Re-dispatch is acceptable because downstream task consumption is only
   `at-least-once`.
+- Relay scans are best-effort per event; one state-write failure is logged and
+  later events in the batch still continue.
 
 ## Component Responsibilities
 
 - Relay:
   claims `PENDING` outbox events, publishes them, and records publish outcome
+- Side-Effect Dispatcher:
+  claims `PENDING` claim side effects, creates task/outbox rows, and records
+  completion or retry state
 - Consumer:
   claims retryable tasks, runs handlers, and records success/failure outcome
 - Compensator:
   recovers due `FAILED`, stale `RUNNING`, and `SUSPENDED` tasks back into the
   retry flow
+- Reservation Reconciler:
+  scans expired Redis reservation leases and finalizes or rolls them back from
+  persisted MySQL claim facts
 
 ## What Phase 2 Guarantees
 
 - No critical async transition is only implicit in application memory
+- a committed claim's required async follow-up is represented durably even
+  before task/outbox rows exist
 - publish ambiguity is visible as `DISPATCHING` and recoverable by scan
 - success-update ambiguity is visible as `SUSPENDED` or stale `RUNNING`
 - every critical failure path ends in one of:
@@ -109,3 +152,4 @@ The delivery contract is `at-least-once`, not `exactly-once`.
 - never-duplicate publish
 - never-duplicate consume
 - full coverage of every real production failure mode
+- exactly-zero lag between claim commit and task/outbox materialization

@@ -1,13 +1,15 @@
 # Benchmark Methodology
 
-Quan now has two benchmark lanes:
+Quan now has three benchmark lanes:
 
 - scenario benchmarks driven by `examples/Quan/bench/cmd/benchclaim`
+- skewed-conflict pressure runs driven by Dockerized `vegeta`
 - capacity scans driven by Dockerized `vegeta`
 
-Use the first lane when you want replay/conflict behavior evidence. Use the
-second lane when you want to find the first failing concurrency level on the
-steady-success claim path.
+Use the first lane when you want replay/conflict behavior evidence under the
+built-in benchmark client. Use the second lane when you want heavy-tail
+per-user contention. Use the third lane when you want to find the first failing
+concurrency level on the steady-success claim path.
 
 ## High-Conflict Pressure
 
@@ -26,6 +28,28 @@ Method:
   measures explicit conflict handling under sustained contention
 - the run is followed by a MySQL ledger audit to verify no oversell, no
   per-user overflow, and no benchmark-vs-ledger drift
+- after the async side-effect refactor, these runs validate claim correctness
+  and ledger closure, not inline task/outbox visibility at claim commit
+
+## Skewed Conflict Pressure
+
+Script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-skewed-conflict.ps1 `
+  -TotalRequests 10000 `
+  -TierSpec "2x2500,10x200,3000x1"
+```
+
+Method:
+
+- request traffic is intentionally concentrated onto a small hot-user subset
+- every request still uses a unique idempotency key, so repeated pressure is
+  user-skew, not replay reuse
+- `vegeta` runs from Docker against the real HTTP endpoint and produces both a
+  transport report and a ledger audit
+- the summary keeps the top user distribution so the skew shape is explicit and
+  reproducible
 
 ## Capacity Scan
 
@@ -50,6 +74,8 @@ Method:
   overflow, and no stock drift
 - the summary also verifies that observed requests do not exceed the unique
   request pool, so the scan does not silently wrap and replay old targets
+- task/outbox creation is now background work and should be validated with the
+  side-effect dispatcher tests rather than interpreted from HTTP latency alone
 
 Failure rule:
 
@@ -81,10 +107,12 @@ Every scenario must start from a clean campaign prepared with:
 ```powershell
 go run ./examples/Quan/bench/cmd/benchprep `
   -dsn "root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4" `
+  -redis-addr "127.0.0.1:6379" `
   -coupon-id <coupon_id> -stock <stock> -per-user-limit <limit> -campaign-name <name>
 ```
 
-Do not reuse a previous scenario's `coupon_id`.
+Do not reuse a previous scenario's `coupon_id`. `benchprep` now resets both the
+MySQL campaign state and the coupon's Redis hot-path state.
 
 ## Scenario Definitions
 
@@ -139,6 +167,23 @@ The script handles:
 - `benchclaim`
 - process teardown in `finally`
 
+Skewed conflict runner:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-skewed-conflict.ps1 `
+  -CouponId <coupon_id> -Stock <stock> -PerUserLimit <limit> `
+  -TotalRequests <requests> -Rate <rate> -DurationSeconds <seconds> `
+  -TierSpec <tier_spec>
+```
+
+The skewed runner handles:
+
+- stale process cleanup on `:8081`
+- app startup and `/ping` probe
+- `benchprep` with Redis hot-path cleanup
+- Dockerized `vegeta` attack/report/encode
+- ledger audit and summary generation
+
 ### Baseline
 
 ```powershell
@@ -174,5 +219,9 @@ go run ./examples/Quan/bench/cmd/benchclaim `
 - These numbers are single-host local results, not capacity limits.
 - They are suitable for comparing traffic shapes and identifying bottlenecks.
 - They are not suitable for claiming production throughput or internet-scale capacity.
+- They now primarily reflect claim-path cost after task/outbox creation was
+  moved off the synchronous transaction path.
+- Skewed-conflict results are for request-shape comparison, not fairness or QoS
+  guarantees across user cohorts.
 - Always use the lifecycle-managed script instead of leaving a benchmark server
   running in the background.

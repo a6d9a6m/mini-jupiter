@@ -7,8 +7,10 @@ flowchart LR
     MW[Middleware<br/>TraceID / Logging / Recovery]
     Coupon[Coupon Service]
     Decision[Redis Claim Adjudicator]
-    MySQL[(MySQL<br/>coupon_claims<br/>async_tasks<br/>outbox_events)]
-    Redis[(Redis<br/>claim stock / user counts / idem<br/>ready / retry / dlq)]
+    MySQL[(MySQL<br/>coupon_claims<br/>claim_side_effects<br/>async_tasks<br/>outbox_events<br/>task_consume_receipts)]
+    Redis[(Redis<br/>claim stock / user counts / idem / claim cache<br/>reservation leases<br/>ready / retry / dlq)]
+    Reconciler[Reservation Reconciler]
+    Dispatcher[Side-Effect Dispatcher]
     Relay[Outbox Relay]
     Consumer[Task Consumer]
     Compensator[Task Compensator]
@@ -19,12 +21,17 @@ flowchart LR
     Client --> HTTP --> MW --> Coupon
     Coupon --> Decision
     Decision --> Redis
-    Coupon -->|task + outbox commit| MySQL
+    Coupon -->|claim + side-effect commit| MySQL
+    Reconciler -->|scan expired reservations| Redis
+    Reconciler -->|finalize or roll back from claim state| MySQL
+    Dispatcher -->|scan PENDING / PROCESSING side effects| MySQL
+    Dispatcher -->|create task + outbox and mark DONE| MySQL
     Relay -->|scan dispatchable events| MySQL
     Relay -->|publish ready| Redis
     Consumer -->|pop ready| Redis
     Consumer -->|task state transitions| MySQL
     Consumer --> Handler
+    Handler -->|dedupe covered handlers with consume receipts| MySQL
     Compensator -->|scan FAILED / SUSPENDED / stale RUNNING| MySQL
     Compensator -->|reschedule retry| Redis
     HTTP --> Metrics
@@ -37,7 +44,12 @@ flowchart LR
 ## Notes
 
 - correctness boundary: MySQL committed state
-- hot-path adjudication: Redis claim decision keys
+- hot-path adjudication: Redis claim decision, claim cache, and reservation keys
 - hot async transport: Redis queue keys
-- reliability mechanisms: outbox relay + task consumer + compensator
-- observability path: HTTP metrics + business metrics + async recovery metrics
+- reliability mechanisms: reservation reconciler + side-effect dispatcher +
+  outbox relay + task consumer + compensator
+- covered handler dedupe: `task_consume_receipts` for handlers that record
+  unique consume receipts
+- observability path: HTTP metrics + business metrics + relay/consumer/
+  compensator metrics; dispatcher and reconciler are not separately instrumented
+  yet

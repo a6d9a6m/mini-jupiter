@@ -3,10 +3,11 @@
 `mini-jupiter` is a Go backend practice project built around reusable runtime
 components and a hardened Quan coupon-claim demo.
 
-The project now focuses on four system-level claims:
+The project now focuses on five system-level claims:
 
 - MySQL is the auditable ledger for claim correctness.
 - Redis provides the coupon-claim hot-path adjudication.
+- Claim side-effects are durably staged before task/outbox dispatch.
 - Outbox and compensator turn async gray failures into recoverable state.
 - Reliability and performance claims are backed by tests, fault injection, and
   scenario-based benchmark evidence.
@@ -51,16 +52,19 @@ Useful endpoints:
 Targeted reliability checks:
 
 ```powershell
-go test ./examples/Quan/internal/coupon -run "Test(Repository_|Service_)" -v
+go test ./examples/Quan/internal/coupon -run "Test(Repository_|Service_|Adjudicator_|ReservationReconciler_|SideEffectDispatcher_)" -v
 go test ./examples/Quan/internal/task -run "Test(E2E_|ConsumeTask|Compensator_)" -v
 go test ./examples/Quan/internal/outbox -run TestRelay -v
 ```
 
-Full project regression:
+Repository-wide test sweep:
 
 ```powershell
 go test ./...
 ```
+
+This includes longer-running task E2E coverage. Use the focused package commands
+above first when isolating async regressions.
 
 ## Benchmark Lifecycle Scripts
 
@@ -78,6 +82,10 @@ Purpose-specific verification scripts:
 - `scripts/quan-run-high-conflict.ps1`
   Runs the high-conflict benchmark and then audits the ledger for oversell,
   per-user overflow, and benchmark-vs-ledger consistency.
+- `scripts/quan-run-skewed-conflict.ps1`
+  Uses Dockerized `vegeta` to apply a skewed per-user request distribution and
+  then audits the ledger for oversell, per-user overflow, and
+  success-vs-ledger consistency.
 - `scripts/quan-run-capacity.ps1`
   Uses Dockerized `vegeta` to run a steady-success concurrency sweep against the
   real claim endpoint and finds the first failing concurrency level.
@@ -130,14 +138,24 @@ powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-fault-recovery.ps1 `
   -RepeatCount 50
 ```
 
-The benchmark and recovery scripts assume local MySQL/Redis are already
-reachable. If you want the script to try `docker compose up -d mysql redis`
-first, pass `-StartDockerInfra`.
+Skewed-conflict example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\quan-run-skewed-conflict.ps1 `
+  -TotalRequests 10000 `
+  -TierSpec "2x2500,10x200,3000x1"
+```
+
+`scripts/quan-run-bench.ps1` expects local MySQL/Redis to already be reachable.
+The higher-level wrappers `quan-run-high-conflict.ps1`,
+`quan-run-skewed-conflict.ps1`, `quan-run-capacity.ps1`, and
+`quan-run-fault-recovery.ps1` can optionally try
+`docker compose up -d mysql redis` first via `-StartDockerInfra`.
 
 Run the high-conflict benchmark and fault-recovery scripts serially. They share
 the same local MySQL, Redis, and `:8081` service port.
-The capacity sweep script also uses the same local service port and should run
-serially.
+The skewed-conflict and capacity sweep scripts also use the same local service
+port and should run serially.
 
 ## Key Docs
 
@@ -152,8 +170,11 @@ serially.
 ## Current Boundary Notes
 
 - The Redis hot path is now the first adjudicator for coupon claims.
-- MySQL still records the final claim, task, and outbox state.
-- The current Redis phase does not yet add a dedicated stale-reservation
-  reconciler.
+- MySQL still records the final claim fact, side-effect obligation, task, and
+  outbox state.
+- Reservation leases are reconciled in the background to close the crash window
+  between Redis admission and MySQL persistence/finalize.
+- Claim transactions now persist `claim_side_effects`; task and outbox creation
+  are dispatched asynchronously after claim commit.
 - Benchmark numbers are scenario-specific local measurements, not production
   capacity claims.

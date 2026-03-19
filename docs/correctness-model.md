@@ -2,29 +2,33 @@
 
 ## Scope
 
-Phase 1 defines the correctness boundary for the Quan coupon-claim path without
-pulling in Phase 2's Redis decision-layer rewrite.
+This document defines the current correctness boundary for the Quan
+coupon-claim path after the Redis hot-path adjudicator and claim side-effect
+staging were introduced.
 
 Current implementation status in this phase:
 
-- claim admission is still serialized by the MySQL transaction path
-- MySQL-committed rows define the final auditable result
-- Redis is not part of the correctness commit boundary yet
-- outbox/task rows are part of the same commit boundary as the claim row
+- Redis is the first adjudicator for claim admission and replay
+- MySQL-committed claim rows define the final auditable claim result
+- `claim_side_effects` is part of the same commit boundary as the claim row
+- `async_tasks` and `outbox_events` are created later by a dispatcher, not
+  inside the claim transaction
 
-This means Phase 1 is about making guarantees explicit, not about pretending the
-Redis hot path is already finished.
+This means correctness is now split into:
+
+- synchronous claim correctness
+- asynchronous side-effect obligation correctness
 
 ## Formal Design Choice
 
 Correctness is judged by MySQL-committed state:
 
 - `coupon_claims` records the committed claim result
-- `async_tasks` records the committed async work item
-- `outbox_events` records the committed post-claim dispatch work
+- `claim_side_effects` records the committed obligation to create async follow-up
+  work after claim commit
 
-Redis may cache or accelerate future paths, but Redis contents are allowed to
-lag, expire, or be rebuilt. A Redis mismatch does not redefine the final result.
+Redis is the first hot-path adjudicator, but Redis contents still do not
+override MySQL-committed claim facts.
 
 ## Invariants
 
@@ -46,73 +50,77 @@ lag, expire, or be rebuilt. A Redis mismatch does not redefine the final result.
    stock budget.
 3. Stock deduction and claim creation happen in the same database transaction.
 
-### Task and Outbox Invariants
+### Side-Effect Invariants
 
-1. A newly committed claim must commit its corresponding `async_tasks` row and
-   `outbox_events` row in the same transaction, or commit none of them.
-2. If a claim row is visible after commit, its initial async task and outbox
-   event are also visible after the same commit.
-3. Phase 1 only guarantees creation atomicity for task/outbox rows. It does not
-   yet claim that every async transition is explicit; that belongs to Phase 2.
+1. A newly committed claim must commit its corresponding
+   `claim_side_effects` row in the same transaction, or commit none of them.
+2. If a claim row is visible after commit, its required async side-effect record
+   is also visible after the same commit.
+3. `async_tasks` and `outbox_events` may appear later, but their required
+   creation must already be represented by durable committed state.
 
 ## Transaction Boundaries
 
-Current transaction boundary in
-`examples/Quan/internal/coupon/repository.go`:
+Current synchronous transaction boundary in
+`examples/Quan/internal/coupon/repository_claim.go`:
 
-1. Lock campaign row with `SELECT ... FOR UPDATE`.
-2. Check campaign status/window.
-3. Check idempotency replay in MySQL.
+1. Redis hot path admits or rejects the request before MySQL work begins.
+2. Lock campaign row with `SELECT ... FOR UPDATE`.
+3. Check campaign status/window and MySQL replay state.
 4. Count existing user claims.
-5. Deduct stock with `available_stock = available_stock - 1 WHERE available_stock > 0`.
-6. Insert `coupon_claims`.
-7. Insert `async_tasks`.
-8. Insert `outbox_events`.
-9. Commit once.
+5. Insert `coupon_claims`.
+6. Deduct MySQL stock with `available_stock = available_stock - 1 WHERE available_stock > 0`.
+7. Insert `claim_side_effects`.
+8. Commit once.
 
 Outside the transaction boundary:
 
-- writing the Redis idempotency cache in `service.go`
+- Redis finalize / rollback after MySQL outcome is known
+- side-effect dispatcher creating `async_tasks` and `outbox_events`
 - outbox relay publish
 - task consume / retry / compensation
 
-These out-of-transaction steps may fail independently. In Phase 1 they must not
-rewrite the meaning of an already committed claim.
+These out-of-transaction steps may fail independently. They must not rewrite
+the meaning of an already committed claim.
 
 ## Guarantees
 
-Phase 1 can defend these statements:
+The current design can defend these statements:
 
 - hotspot contention is serialized at the database row level for correctness
 - duplicate request replay with the same idempotency key reuses the same claim
   result
 - sold-out requests do not create extra claim rows
 - per-user claim limits are enforced on committed rows
-- claim, task, and outbox creation are atomic at commit time
+- claim and side-effect obligation creation are atomic at commit time
 
 ## Non-Guarantees
 
-Phase 1 does not claim:
+The current design does not claim:
 
 - Redis as the correctness authority
 - exactly-once delivery
 - zero contention on hotspot campaigns
 - multi-region or multi-primary claim correctness
 - instant convergence between Redis and MySQL on every request path
+- inline visibility of `async_tasks` and `outbox_events` at claim commit time
 
 ## Accepted Tradeoffs
 
-- No Redis pre-deduct is used as the correctness basis in Phase 1.
-- Coupon-level hotspot row contention is accepted to keep correctness simple and
-  explicit before Phase 2.
-- MySQL unique indexes remain defensive rails, but the current path still relies
-  primarily on transactional checks rather than a Redis decision layer.
+- Redis hot-path admission reserves stock and user quota before MySQL commit;
+  the reservation reconciler closes the crash window instead of pretending it
+  does not exist.
+- Coupon-level hotspot row contention is still accepted at the MySQL stock row
+  because committed stock remains the final ledger rail.
+- MySQL unique indexes remain defensive rails behind the Redis decision layer.
 - Async delivery semantics stay `at-least-once`; duplicate consumption must be
   tolerated by design.
+- Side-effect dispatch may lag claim commit, but lack of a dispatcher run does
+  not erase the committed obligation recorded in `claim_side_effects`.
 
 ## Evidence Mapping
 
-Phase 1 correctness claims are backed by these tests:
+Current correctness claims are backed by these tests:
 
 - replay: `TestRepository_IdempotencySameKeyReturnsSameClaim`
 - replay under contention: `TestRepository_ConcurrentReplaySameIdempotencyReturnsSameClaim`
@@ -120,12 +128,16 @@ Phase 1 correctness claims are backed by these tests:
 - sold out: `TestRepository_SoldOutAfterStockExhausted`
 - limit reached: `TestRepository_PerUserLimitEnforced`
 - hotspot contention / no oversell: `TestRepository_ConcurrentClaimNoOversell`
+- side-effect staging without inline task/outbox:
+  `TestRepository_ClaimCreatesPendingSideEffectWithoutInlineTaskOutbox`
+- side-effect dispatch materialization:
+  `TestSideEffectDispatcher_DispatchesPendingClaimSideEffect`
+- stale reservation rollback/finalize:
+  `TestReservationReconciler_RollsBackExpiredLeaseWithoutPersistedClaim`,
+  `TestReservationReconciler_FinalizesExpiredLeaseWhenClaimWasPersisted`
 
-## Next Phase Boundary
+## Current Boundary
 
-Phase 2 will move the hot-path decision step toward Redis while preserving the
-same correctness contract defined here:
-
-- Redis handles admission and replay acceleration
-- MySQL remains the committed auditable state
-- outbox and task transitions become an explicit state machine
+The current phase keeps MySQL claim rows as the auditable claim fact while
+allowing async follow-up creation to happen later through durable side-effect
+staging.

@@ -16,6 +16,7 @@ Give a concrete answer to:
 | Relay publish failure | `PublishReady` fails once | `TestE2E_FaultInjection_RelayPublishFailure_RetryThenRecover` | outbox retries, task reaches `SUCCESS` |
 | Relay publish success but mark-published failure | relay repository `MarkPublished` fails once | `TestE2E_FaultInjection_RelayMarkPublishedFailure_RecoveredByDispatchScan` | stale `DISPATCHING` recovered, outbox reaches `PUBLISHED` |
 | Consumer success but status update failure | task repository `MarkSuccess` fails once | `TestE2E_FaultInjection_ConsumerMarkSuccessFailure_RecoveredByCompensation` | task becomes `SUSPENDED`/recovered, final `SUCCESS` |
+| Consumer success-update ambiguity with handler replay | task repository `MarkSuccess` fails once while handler uses consume receipts | `TestE2E_FaultInjection_ConsumerMarkSuccessFailure_DeduplicatesSideEffectByUniqueKey` | final `SUCCESS` with one durable consume receipt |
 | Retry scheduling failure | queue `ScheduleRetry` fails once | `TestE2E_TaskPipeline_RetryScheduleFailure_RecoveredByCompensation` | compensator restores retry flow, final `SUCCESS` |
 | Duplicate delivery / duplicate consume | same task ID pushed twice to ready queue | `TestE2E_FaultInjection_DuplicateReadyDelivery_ConsumesOnce` | handler side effect still runs once |
 | Short Redis outage simulation | `PublishReady` fails multiple consecutive times | `TestE2E_FaultInjection_ShortRedisOutageOnPublishReady_Recovered` | relay keeps retrying until queue recovers |
@@ -49,9 +50,12 @@ These tests support only:
 - deterministic failure reproduction inside the covered matrix
 - recoverable async gray failures
 - `at-least-once` behavior with visible state
+- duplicate side-effect suppression for handlers backed by consume receipts
 
 They do not support:
 
 - `exactly-once`
+- side-effect dispatcher failure coverage; those paths are validated by coupon
+  package tests
 - full production failure coverage
 - zero duplicates under all conditions

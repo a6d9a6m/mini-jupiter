@@ -2,7 +2,8 @@
 
 ## Goal
 
-Map every Phase 1 correctness claim to a concrete regression test.
+Map the core synchronous claim-correctness invariants to concrete regression
+tests.
 
 ## Matrix
 
@@ -31,10 +32,15 @@ Integration environment expected by these tests:
 
 ## Reading the Results
 
-Phase 1 is considered complete only if the matrix still proves:
+The synchronous claim path is considered covered only if the matrix still
+proves:
 
 - replay
 - conflict
 - sold out
 - limit reached
 - hotspot contention without oversell
+
+This matrix covers the synchronous claim path only. Reservation reconciler and
+side-effect dispatcher coverage now live in the coupon integration tests called
+out by [Correctness Model](docs/correctness-model.md).
