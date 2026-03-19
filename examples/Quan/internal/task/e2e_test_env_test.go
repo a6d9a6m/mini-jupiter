@@ -26,7 +26,7 @@ import (
 const (
 	testTaskMySQLDSNEnv  = "QUAN_TEST_MYSQL_DSN"
 	testTaskRedisAddrEnv = "QUAN_TEST_REDIS_ADDR"
-	defaultTaskMySQLDSN  = "root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4"
+	defaultTaskMySQLDSN  = "root:root@tcp(127.0.0.1:3306)/mini_jupiter_task?parseTime=true&loc=Local&charset=utf8mb4"
 	defaultTaskRedisAddr = "127.0.0.1:6379"
 )
 
@@ -52,8 +52,57 @@ func startBackgroundComponents(t *testing.T, ctx context.Context, relay *outbox.
 
 func newTaskHTTPServer(svc *Service) *httptest.Server {
 	mux := http.NewServeMux()
-	NewHTTPHandler(svc).Register(mux)
+	mux.HandleFunc("POST /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			TaskType string          `json:"task_type"`
+			BizID    string          `json:"biz_id"`
+			Payload  json.RawMessage `json:"payload"`
+			MaxRetry int             `json:"max_retry"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		taskRec, err := svc.CreateTask(r.Context(), CreateTaskRequest{
+			TaskType: req.TaskType,
+			BizID:    req.BizID,
+			Payload:  req.Payload,
+			MaxRetry: req.MaxRetry,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeTaskTestOK(w, map[string]any{
+			"task_id": taskRec.ID,
+		})
+	})
+	mux.HandleFunc("POST /api/v1/tasks/{task_id}/replay", func(w http.ResponseWriter, r *http.Request) {
+		taskID, err := strconv.ParseInt(r.PathValue("task_id"), 10, 64)
+		if err != nil || taskID <= 0 {
+			http.Error(w, "invalid task_id", http.StatusBadRequest)
+			return
+		}
+		if err := svc.ReplayDLQTask(r.Context(), taskID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeTaskTestOK(w, map[string]any{
+			"task_id":  taskID,
+			"replayed": true,
+		})
+	})
 	return httptest.NewServer(mux)
+}
+
+func writeTaskTestOK(w http.ResponseWriter, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"code":    0,
+		"message": "ok",
+		"data":    data,
+	})
 }
 
 func createTaskViaHTTP(t *testing.T, baseURL, bizID string, maxRetry int) int64 {
@@ -191,6 +240,7 @@ func openTaskIntegrationDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("resolve sql dir failed: %v", err)
 	}
+	resetTaskSchema(t, db)
 	migrator, err := mysql.NewMigrator(db, mysql.MigrationConfig{
 		Dir:       sqlDir,
 		TableName: "schema_migrations",
@@ -219,7 +269,7 @@ func openTaskIntegrationRedis(t *testing.T) *redis.Client {
 	addr, fromEnv := resolveTaskRedisAddr()
 	client, err := redis.NewClient(redis.Config{
 		Addr:        addr,
-		DB:          0,
+		DB:          1,
 		DialTimeout: 2 * time.Second,
 	})
 	if err != nil {
@@ -286,4 +336,22 @@ func ensureTaskDatabaseExists(t *testing.T, dsn string) {
 
 func escapeTaskBackticks(s string) string {
 	return strings.ReplaceAll(s, "`", "``")
+}
+
+func resetTaskSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	statements := []string{
+		`DROP TABLE IF EXISTS task_consume_receipts`,
+		`DROP TABLE IF EXISTS claim_side_effects`,
+		`DROP TABLE IF EXISTS async_tasks`,
+		`DROP TABLE IF EXISTS outbox_events`,
+		`DROP TABLE IF EXISTS coupon_claims`,
+		`DROP TABLE IF EXISTS coupon_campaigns`,
+		`DROP TABLE IF EXISTS schema_migrations`,
+	}
+	for _, stmt := range statements {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("reset task schema failed for %q: %v", stmt, err)
+		}
+	}
 }

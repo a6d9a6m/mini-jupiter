@@ -147,22 +147,42 @@ func (r *Relay) dispatchOnce(ctx context.Context) error {
 	for _, evt := range events {
 		ok, markErr := r.repo.TryMarkDispatching(ctx, evt.ID)
 		if markErr != nil {
-			return markErr
+			applog.L(ctx).Warn("mark outbox event dispatching failed",
+				zap.Int64("event_id", evt.ID),
+				zap.Error(markErr),
+			)
+			continue
 		}
 		if !ok {
 			continue
 		}
 		payload, parseErr := ParseTaskCreatedPayload(evt.PayloadJSON)
 		if parseErr != nil {
-			_ = r.repo.MarkSuspended(ctx, evt.ID, "invalid outbox payload: "+parseErr.Error())
+			if markSuspendErr := r.repo.MarkSuspended(ctx, evt.ID, "invalid outbox payload: "+parseErr.Error()); markSuspendErr != nil {
+				applog.L(ctx).Warn("mark outbox event suspended failed",
+					zap.Int64("event_id", evt.ID),
+					zap.Error(markSuspendErr),
+				)
+			}
 			continue
 		}
 		if payload.TaskID <= 0 {
-			_ = r.repo.MarkSuspended(ctx, evt.ID, "invalid task_id in outbox payload")
+			if markSuspendErr := r.repo.MarkSuspended(ctx, evt.ID, "invalid task_id in outbox payload"); markSuspendErr != nil {
+				applog.L(ctx).Warn("mark outbox event suspended failed",
+					zap.Int64("event_id", evt.ID),
+					zap.Error(markSuspendErr),
+				)
+			}
 			continue
 		}
 		if pubErr := r.publisher.PublishReady(ctx, payload.TaskID); pubErr != nil {
-			_ = r.repo.MarkRetry(ctx, evt.ID, relayBackoff(evt.RetryCount, r.cfg.BackoffBase), pubErr.Error())
+			if markRetryErr := r.repo.MarkRetry(ctx, evt.ID, relayBackoff(evt.RetryCount, r.cfg.BackoffBase), pubErr.Error()); markRetryErr != nil {
+				applog.L(ctx).Warn("mark outbox event retry failed",
+					zap.Int64("event_id", evt.ID),
+					zap.Int64("task_id", payload.TaskID),
+					zap.Error(markRetryErr),
+				)
+			}
 			continue
 		}
 		if markErr := r.repo.MarkPublished(ctx, evt.ID); markErr != nil {

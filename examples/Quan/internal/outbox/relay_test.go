@@ -12,11 +12,12 @@ type fakeRelayRepo struct {
 	events  []Event
 	listErr error
 
-	tryMarkDispatchingErr bool
-	markPublishedErr      error
-	markRetryErr          error
-	markSuspendedErr      error
-	recoverErr            error
+	tryMarkDispatchingErr    bool
+	tryMarkDispatchingErrIDs map[int64]bool
+	markPublishedErr         error
+	markRetryErr             error
+	markSuspendedErr         error
+	recoverErr               error
 
 	mu               sync.Mutex
 	listCalls        int
@@ -49,7 +50,7 @@ func (f *fakeRelayRepo) TryMarkDispatching(_ context.Context, eventID int64) (bo
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tryDispatchIDs = append(f.tryDispatchIDs, eventID)
-	if f.tryMarkDispatchingErr {
+	if f.tryMarkDispatchingErr || (f.tryMarkDispatchingErrIDs != nil && f.tryMarkDispatchingErrIDs[eventID]) {
 		return false, errors.New("mark dispatching failed")
 	}
 	return true, nil
@@ -248,5 +249,80 @@ func TestRelayRunRecoversStaleDispatching(t *testing.T) {
 
 	if repo.recoverCalls == 0 {
 		t.Fatalf("expected stale dispatching recovery to be called")
+	}
+}
+
+func TestRelayDispatchMarkDispatchingFailureContinuesBatch(t *testing.T) {
+	repo := &fakeRelayRepo{
+		events: []Event{
+			{ID: 11, PayloadJSON: []byte(`{"task_id":111}`)},
+			{ID: 12, PayloadJSON: []byte(`{"task_id":222}`)},
+		},
+		tryMarkDispatchingErrIDs: map[int64]bool{11: true},
+	}
+	pub := &fakePublisher{}
+	relay, err := NewRelay(repo, pub, RelayConfig{Enabled: true})
+	if err != nil {
+		t.Fatalf("new relay failed: %v", err)
+	}
+
+	if err := relay.dispatchOnce(context.Background()); err != nil {
+		t.Fatalf("dispatch once failed: %v", err)
+	}
+	if len(repo.tryDispatchIDs) != 2 {
+		t.Fatalf("expected both events to attempt dispatch mark, got %+v", repo.tryDispatchIDs)
+	}
+	if len(pub.published) != 1 || pub.published[0] != 222 {
+		t.Fatalf("expected second event to still publish task 222, got %+v", pub.published)
+	}
+	if len(repo.markPublishedIDs) != 1 || repo.markPublishedIDs[0] != 12 {
+		t.Fatalf("expected second event to be marked published, got %+v", repo.markPublishedIDs)
+	}
+}
+
+func TestRelayDispatchMarkRetryFailureContinuesBatch(t *testing.T) {
+	repo := &fakeRelayRepo{
+		events: []Event{
+			{ID: 13, PayloadJSON: []byte(`{"task_id":333}`), RetryCount: 1},
+			{ID: 14, PayloadJSON: []byte(`{"task_id":444}`), RetryCount: 0},
+		},
+		markRetryErr: errors.New("retry write failed"),
+	}
+	pub := &fakePublisher{err: errors.New("redis down")}
+	relay, err := NewRelay(repo, pub, RelayConfig{Enabled: true})
+	if err != nil {
+		t.Fatalf("new relay failed: %v", err)
+	}
+
+	if err := relay.dispatchOnce(context.Background()); err != nil {
+		t.Fatalf("dispatch once failed: %v", err)
+	}
+	if len(repo.markRetryIDs) != 2 {
+		t.Fatalf("expected both retry marks to be attempted, got %+v", repo.markRetryIDs)
+	}
+}
+
+func TestRelayDispatchMarkSuspendedFailureContinuesBatch(t *testing.T) {
+	repo := &fakeRelayRepo{
+		events: []Event{
+			{ID: 15, PayloadJSON: []byte(`{"task_id":"bad"}`)},
+			{ID: 16, PayloadJSON: []byte(`{"task_id":555}`)},
+		},
+		markSuspendedErr: errors.New("suspend write failed"),
+	}
+	pub := &fakePublisher{}
+	relay, err := NewRelay(repo, pub, RelayConfig{Enabled: true})
+	if err != nil {
+		t.Fatalf("new relay failed: %v", err)
+	}
+
+	if err := relay.dispatchOnce(context.Background()); err != nil {
+		t.Fatalf("dispatch once failed: %v", err)
+	}
+	if len(repo.markSuspendedIDs) != 1 || repo.markSuspendedIDs[0] != 15 {
+		t.Fatalf("expected first event to attempt suspend mark, got %+v", repo.markSuspendedIDs)
+	}
+	if len(pub.published) != 1 || pub.published[0] != 555 {
+		t.Fatalf("expected second event to still publish, got %+v", pub.published)
 	}
 }

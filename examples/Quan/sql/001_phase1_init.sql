@@ -1,9 +1,3 @@
-CREATE DATABASE IF NOT EXISTS mini_jupiter
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
-USE mini_jupiter;
-
 CREATE TABLE IF NOT EXISTS coupon_campaigns (
   coupon_id BIGINT NOT NULL AUTO_INCREMENT,
   name VARCHAR(128) NOT NULL,
