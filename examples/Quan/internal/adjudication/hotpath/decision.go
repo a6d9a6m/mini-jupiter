@@ -185,6 +185,7 @@ redis.call('HSET', KEYS[5],
 )
 redis.call('PEXPIRE', KEYS[5], ARGV[8])
 redis.call('ZADD', KEYS[6], ARGV[7], ARGV[3])
+redis.call('ZADD', KEYS[7], ARGV[7], ARGV[3])
 return {'ADMITTED', ARGV[3]}
 `, []string{
 		CampaignStockKey(campaign.CouponID),
@@ -193,6 +194,7 @@ return {'ADMITTED', ARGV[3]}
 		IdemDecisionKey(campaign.CouponID, userID, idemKey),
 		ReservationLeaseKey(reservationID),
 		ReservationLeaseIndexKey(),
+		CouponReservationLeaseIndexKey(campaign.CouponID),
 	}, now.UTC().UnixMilli(),
 		strconv.FormatInt(userID, 10),
 		reservationID,
@@ -281,35 +283,15 @@ return 'UNCHANGED'
 }
 
 func (a *Adjudicator) countActiveReservations(ctx context.Context, couponID int64, now time.Time) (int, error) {
-	ids, err := a.rdb.ZRange(ctx, ReservationLeaseIndexKey(), 0, -1).Result()
+	indexKey := CouponReservationLeaseIndexKey(couponID)
+	if err := a.rdb.ZRemRangeByScore(ctx, indexKey, "-inf", strconv.FormatInt(now.UTC().UnixMilli(), 10)).Err(); err != nil {
+		return 0, err
+	}
+	count, err := a.rdb.ZCard(ctx, indexKey).Result()
 	if err != nil {
 		return 0, err
 	}
-	count := 0
-	for _, reservationID := range ids {
-		fields, leaseErr := a.rdb.HGetAll(ctx, ReservationLeaseKey(reservationID)).Result()
-		if leaseErr != nil {
-			return 0, leaseErr
-		}
-		if len(fields) == 0 {
-			continue
-		}
-		lease, parseErr := parseReservationLease(fields)
-		if parseErr != nil {
-			return 0, fmt.Errorf("parse reservation lease %s: %w", reservationID, parseErr)
-		}
-		if lease.CouponID != couponID {
-			continue
-		}
-		if lease.State != "LEASED" {
-			continue
-		}
-		if !lease.LeaseUntil.After(now) {
-			continue
-		}
-		count++
-	}
-	return count, nil
+	return int(count), nil
 }
 
 // WaitResult 用于处理相同幂等键命中的 PENDING 场景。

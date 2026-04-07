@@ -42,12 +42,14 @@ end
 redis.call('HSET', KEYS[2], 'state', 'FINALIZED', 'claim_id', ARGV[2], 'lease_until_ms', ARGV[4])
 redis.call('PEXPIRE', KEYS[2], ARGV[5])
 redis.call('ZREM', KEYS[3], ARGV[1])
-redis.call('PUBLISH', KEYS[4], ARGV[6])
+redis.call('ZREM', KEYS[4], ARGV[1])
+redis.call('PUBLISH', KEYS[5], ARGV[6])
 return 1
 `, []string{
 		IdemDecisionKey(couponID, userID, idemKey),
 		ReservationLeaseKey(reservationID),
 		ReservationLeaseIndexKey(),
+		CouponReservationLeaseIndexKey(couponID),
 		IdemDecisionResultChannel(couponID, userID, idemKey),
 	}, reservationID,
 		strconv.FormatInt(claimID, 10),
@@ -83,7 +85,8 @@ end
 redis.call('HSET', KEYS[4], 'state', 'ROLLED_BACK', 'lease_until_ms', ARGV[3])
 redis.call('PEXPIRE', KEYS[4], ARGV[4])
 redis.call('ZREM', KEYS[5], ARGV[1])
-redis.call('PUBLISH', KEYS[6], 'ROLLED_BACK')
+redis.call('ZREM', KEYS[6], ARGV[1])
+redis.call('PUBLISH', KEYS[7], 'ROLLED_BACK')
 return 1
 `, []string{
 		CampaignStockKey(couponID),
@@ -91,6 +94,7 @@ return 1
 		IdemDecisionKey(couponID, userID, idemKey),
 		ReservationLeaseKey(reservationID),
 		ReservationLeaseIndexKey(),
+		CouponReservationLeaseIndexKey(couponID),
 		IdemDecisionResultChannel(couponID, userID, idemKey),
 	}, reservationID,
 		strconv.FormatInt(userID, 10),
@@ -180,4 +184,8 @@ func ReservationLeaseKey(reservationID string) string {
 
 func ReservationLeaseIndexKey() string {
 	return fmt.Sprintf("%s:reservation:index", DecisionNamespace)
+}
+
+func CouponReservationLeaseIndexKey(couponID int64) string {
+	return fmt.Sprintf("%s:reservation:coupon:%d:index", DecisionNamespace, couponID)
 }

@@ -211,3 +211,67 @@ func TestAdjudicator_EnsureCampaign_RestoresMissingStockAfterSubtractingActiveRe
 		t.Fatalf("expected repaired stock 2 after subtracting active reservation, got %d", got)
 	}
 }
+
+func TestAdjudicator_MaintainsCouponScopedLeaseIndex(t *testing.T) {
+	redisClient := quanenv.OpenIntegrationRedis(t, 3)
+	ctx := context.Background()
+
+	adjudicator := NewAdjudicator(redisClient)
+	now := time.Now().UTC()
+	couponA := quanenv.NextCouponID()
+	couponB := quanenv.NextCouponID()
+	for _, couponID := range []int64{couponA, couponB} {
+		if err := adjudicator.EnsureCampaign(ctx, CampaignSnapshot{
+			CouponID:       couponID,
+			Status:         "ACTIVE",
+			AvailableStock: 2,
+			PerUserLimit:   1,
+			StartAt:        now.Add(-time.Hour),
+			EndAt:          now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("ensure campaign %d failed: %v", couponID, err)
+		}
+	}
+
+	decisionA, err := adjudicator.Decide(ctx, CampaignSnapshot{CouponID: couponA}, 94006, "coupon-a", now, "coupon-a-reservation")
+	if err != nil {
+		t.Fatalf("decide coupon A failed: %v", err)
+	}
+	decisionB, err := adjudicator.Decide(ctx, CampaignSnapshot{CouponID: couponB}, 94007, "coupon-b", now, "coupon-b-reservation")
+	if err != nil {
+		t.Fatalf("decide coupon B failed: %v", err)
+	}
+	if decisionA.Code != DecisionCodeAdmitted || decisionB.Code != DecisionCodeAdmitted {
+		t.Fatalf("expected admitted decisions, got A=%s B=%s", decisionA.Code, decisionB.Code)
+	}
+
+	countA, err := redisClient.Raw().ZCard(ctx, CouponReservationLeaseIndexKey(couponA)).Result()
+	if err != nil {
+		t.Fatalf("load coupon A lease index failed: %v", err)
+	}
+	countB, err := redisClient.Raw().ZCard(ctx, CouponReservationLeaseIndexKey(couponB)).Result()
+	if err != nil {
+		t.Fatalf("load coupon B lease index failed: %v", err)
+	}
+	if countA != 1 || countB != 1 {
+		t.Fatalf("expected one live lease per coupon index, got A=%d B=%d", countA, countB)
+	}
+
+	if err := adjudicator.Finalize(ctx, couponA, 94006, "coupon-a", decisionA.ReservationID, 991123); err != nil {
+		t.Fatalf("finalize coupon A failed: %v", err)
+	}
+	if err := adjudicator.Rollback(ctx, couponB, 94007, "coupon-b", decisionB.ReservationID); err != nil {
+		t.Fatalf("rollback coupon B failed: %v", err)
+	}
+	countA, err = redisClient.Raw().ZCard(ctx, CouponReservationLeaseIndexKey(couponA)).Result()
+	if err != nil {
+		t.Fatalf("reload coupon A lease index failed: %v", err)
+	}
+	countB, err = redisClient.Raw().ZCard(ctx, CouponReservationLeaseIndexKey(couponB)).Result()
+	if err != nil {
+		t.Fatalf("reload coupon B lease index failed: %v", err)
+	}
+	if countA != 0 || countB != 0 {
+		t.Fatalf("expected coupon lease indexes to be drained, got A=%d B=%d", countA, countB)
+	}
+}
