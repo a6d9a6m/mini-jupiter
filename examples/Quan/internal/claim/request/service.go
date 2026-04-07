@@ -409,16 +409,21 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context, limit int) error {
 				result = "skip_fresh"
 				continue
 			}
-			if err := r.publisher.PublishAccepted(ctx, req); err != nil {
-				result = "publish_error"
-				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
-				continue
-			}
-			applied, _, err := classifyStatusUpdate(r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""))
+			applied, updateErr := r.store.CompareAndUpdateStatus(ctx, req, StatusEnqueued, 0, "")
+			_, _, err = classifyStatusUpdate(updateErr)
 			if err != nil {
 				result = "mark_enqueued_error"
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				return err
+			}
+			if !applied {
+				result = "skip_stale"
+				continue
+			}
+			if err := r.publisher.PublishAccepted(ctx, req); err != nil {
+				result = "publish_error"
+				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
+				continue
 			}
 			if applied {
 				r.metrics.IncClaimRequestState(string(StatusEnqueued))
@@ -430,16 +435,21 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context, limit int) error {
 				result = "skip_fresh"
 				continue
 			}
-			if err := r.publisher.PublishAccepted(ctx, req); err != nil {
-				result = "publish_error"
-				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
-				continue
-			}
-			applied, _, err := classifyStatusUpdate(r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""))
+			applied, updateErr := r.store.CompareAndUpdateStatus(ctx, req, StatusEnqueued, 0, "")
+			_, _, err = classifyStatusUpdate(updateErr)
 			if err != nil {
 				result = "mark_enqueued_error"
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				return err
+			}
+			if !applied {
+				result = "skip_stale"
+				continue
+			}
+			if err := r.publisher.PublishAccepted(ctx, req); err != nil {
+				result = "publish_error"
+				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
+				continue
 			}
 			if applied {
 				r.metrics.IncClaimRequestState(string(StatusEnqueued))
@@ -476,16 +486,21 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context, limit int) error {
 				continue
 			}
 			action = "processing_republish"
-			if err := r.publisher.PublishAccepted(ctx, req); err != nil {
-				result = "publish_error"
-				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
-				continue
-			}
-			applied, _, err := classifyStatusUpdate(r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""))
+			applied, updateErr := r.store.CompareAndUpdateStatus(ctx, req, StatusEnqueued, 0, "")
+			_, _, err = classifyStatusUpdate(updateErr)
 			if err != nil {
 				result = "mark_enqueued_error"
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				return err
+			}
+			if !applied {
+				result = "skip_stale"
+				continue
+			}
+			if err := r.publisher.PublishAccepted(ctx, req); err != nil {
+				result = "publish_error"
+				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
+				continue
 			}
 			if applied {
 				r.metrics.IncClaimRequestState(string(StatusEnqueued))

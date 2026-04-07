@@ -206,6 +206,90 @@ return {'UPDATED', current}
 	return s.wait(ctx, requestID, status)
 }
 
+func (s *RedisRequestStore) CompareAndUpdateStatus(ctx context.Context, snapshot Request, status Status, claimID int64, failureCode string) (bool, error) {
+	if snapshot.ID == "" {
+		return false, fmt.Errorf("request id is empty")
+	}
+	key := s.requestKey(snapshot.ID)
+	nowMs := time.Now().UTC().UnixMilli()
+	allowed := allowedPreviousStatuses(status)
+	result, err := s.raw.Eval(ctx, `
+local current = redis.call('HGET', KEYS[1], 'status')
+if current == false or current == nil then
+  return {'NOT_FOUND'}
+end
+local updated_at = redis.call('HGET', KEYS[1], 'updated_at_ms')
+if updated_at ~= ARGV[10] then
+  return {'STALE', current, updated_at}
+end
+if current ~= ARGV[11] then
+  return {'STALE', current, updated_at}
+end
+local target = ARGV[1]
+local allowed_csv = ARGV[2]
+local allowed = {}
+for value in string.gmatch(allowed_csv, '([^,]+)') do
+  allowed[value] = true
+end
+if not allowed[current] then
+  return {'SKIPPED', current}
+end
+redis.call('HSET', KEYS[1], 'status', target, 'failure_code', ARGV[3], 'updated_at_ms', ARGV[4])
+if tonumber(ARGV[5]) > 0 then
+  redis.call('HSET', KEYS[1], 'claim_id', ARGV[5])
+end
+if target == 'SUCCEEDED' or target == 'ROLLED_BACK' or target == 'FAILED' then
+  redis.call('HSET', KEYS[1], 'finished_at_ms', ARGV[4])
+end
+if target == 'PROCESSING' then
+  redis.call('HSET', KEYS[1], 'processed_at_ms', ARGV[4])
+end
+redis.call('PEXPIRE', KEYS[1], ARGV[6])
+for i = 2, 8 do
+  redis.call('ZREM', KEYS[i], ARGV[8])
+end
+redis.call('ZADD', KEYS[tonumber(ARGV[7])], ARGV[9], ARGV[8])
+return {'UPDATED', current}
+`, []string{
+		key,
+		s.statusKey(StatusAccepted),
+		s.statusKey(StatusPublishing),
+		s.statusKey(StatusEnqueued),
+		s.statusKey(StatusProcessing),
+		s.statusKey(StatusSucceeded),
+		s.statusKey(StatusRolledBack),
+		s.statusKey(StatusFailed),
+	},
+		string(status),
+		strings.Join(statusStrings(allowed), ","),
+		failureCode,
+		strconv.FormatInt(nowMs, 10),
+		strconv.FormatInt(claimID, 10),
+		strconv.FormatInt(s.cfg.TTL.Milliseconds(), 10),
+		strconv.Itoa(statusKeyIndex(status)),
+		snapshot.ID,
+		strconv.FormatInt(nowMs, 10),
+		strconv.FormatInt(snapshot.UpdatedAt.UTC().UnixMilli(), 10),
+		string(snapshot.Status),
+	).StringSlice()
+	if err != nil {
+		return false, err
+	}
+	if len(result) == 0 {
+		return false, fmt.Errorf("empty compare-and-update result")
+	}
+	switch result[0] {
+	case "NOT_FOUND":
+		return false, ErrRequestNotFound
+	case "STALE", "SKIPPED":
+		return false, nil
+	case "UPDATED":
+		return true, s.wait(ctx, snapshot.ID, status)
+	default:
+		return false, fmt.Errorf("unknown compare-and-update result: %v", result)
+	}
+}
+
 func (s *RedisRequestStore) Get(ctx context.Context, requestID string) (Request, bool, error) {
 	fields, err := s.raw.HGetAll(ctx, s.requestKey(requestID)).Result()
 	if err != nil {

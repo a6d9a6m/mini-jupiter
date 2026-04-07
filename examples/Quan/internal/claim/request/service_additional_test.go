@@ -395,6 +395,35 @@ func TestReconciler_ProcessingLookupErrorReturnsError(t *testing.T) {
 	}
 }
 
+func TestReconciler_DoesNotRepublishWhenCompareAndUpdateSkips(t *testing.T) {
+	stale := time.Now().UTC().Add(-time.Minute)
+	base := newFakeRequestStore()
+	if err := base.Create(context.Background(), Request{
+		ID:             "req-skip-republish",
+		CouponID:       1018,
+		UserID:         2018,
+		IdempotencyKey: "idem-skip-republish",
+		Status:         StatusEnqueued,
+		AcceptedAt:     stale,
+		UpdatedAt:      stale,
+	}); err != nil {
+		t.Fatalf("seed request failed: %v", err)
+	}
+	store := &compareSkipStore{RequestStore: base}
+	pub := &fakePublisher{}
+	reconciler := NewReconciler(store, pub, &fakeHotPath{}, &fakeClaimLookup{}, ReconcilePolicy{
+		PublishStaleAfter:    time.Second,
+		ProcessingStaleAfter: time.Second,
+	})
+
+	if err := reconciler.ReconcileOnce(context.Background(), 10); err != nil {
+		t.Fatalf("reconcile should tolerate compare-and-update skip: %v", err)
+	}
+	if len(pub.published) != 0 {
+		t.Fatalf("expected no publish after compare-and-update skip, got %+v", pub.published)
+	}
+}
+
 type countingHotPath struct {
 	fakeHotPath
 	decideCalls   int
@@ -442,6 +471,10 @@ func (s *createExistsStore) UpdateStatus(context.Context, string, Status, int64,
 	return nil
 }
 
+func (s *createExistsStore) CompareAndUpdateStatus(context.Context, Request, Status, int64, string) (bool, error) {
+	return false, nil
+}
+
 func (s *createExistsStore) Get(context.Context, string) (Request, bool, error) {
 	return Request{}, false, nil
 }
@@ -468,6 +501,13 @@ func (s *statusUpdateErrorStore) UpdateStatus(ctx context.Context, requestID str
 		return err
 	}
 	return s.RequestStore.UpdateStatus(ctx, requestID, status, claimID, failureCode)
+}
+
+func (s *statusUpdateErrorStore) CompareAndUpdateStatus(ctx context.Context, snapshot Request, status Status, claimID int64, failureCode string) (bool, error) {
+	if err, ok := s.errorsByStatus[status]; ok {
+		return false, err
+	}
+	return s.RequestStore.CompareAndUpdateStatus(ctx, snapshot, status, claimID, failureCode)
 }
 
 type createDurabilityPendingStore struct {
@@ -500,10 +540,29 @@ func (s *statusUpdateAfterSuccessErrorStore) UpdateStatus(ctx context.Context, r
 	return nil
 }
 
+func (s *statusUpdateAfterSuccessErrorStore) CompareAndUpdateStatus(ctx context.Context, snapshot Request, status Status, claimID int64, failureCode string) (bool, error) {
+	applied, err := s.RequestStore.CompareAndUpdateStatus(ctx, snapshot, status, claimID, failureCode)
+	if err != nil || !applied {
+		return applied, err
+	}
+	if postErr, ok := s.errorsByStatus[status]; ok {
+		return true, postErr
+	}
+	return true, nil
+}
+
 type errorClaimLookup struct {
 	err error
 }
 
 func (e errorClaimLookup) FindClaimID(context.Context, Request) (int64, bool, error) {
 	return 0, false, e.err
+}
+
+type compareSkipStore struct {
+	RequestStore
+}
+
+func (s *compareSkipStore) CompareAndUpdateStatus(context.Context, Request, Status, int64, string) (bool, error) {
+	return false, nil
 }

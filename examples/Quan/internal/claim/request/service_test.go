@@ -520,6 +520,17 @@ func (f *fakeRequestStore) UpdateStatus(_ context.Context, requestID string, sta
 	return nil
 }
 
+func (f *fakeRequestStore) CompareAndUpdateStatus(ctx context.Context, snapshot Request, status Status, claimID int64, failureCode string) (bool, error) {
+	req, ok := f.requests[snapshot.ID]
+	if !ok {
+		return false, ErrRequestNotFound
+	}
+	if req.Status != snapshot.Status || !req.UpdatedAt.Equal(snapshot.UpdatedAt) {
+		return false, nil
+	}
+	return true, f.UpdateStatus(ctx, snapshot.ID, status, claimID, failureCode)
+}
+
 func (f *fakeRequestStore) Get(_ context.Context, requestID string) (Request, bool, error) {
 	req, ok := f.requests[requestID]
 	return req, ok, nil

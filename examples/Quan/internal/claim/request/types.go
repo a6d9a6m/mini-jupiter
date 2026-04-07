@@ -160,6 +160,7 @@ type HotPath interface {
 type RequestStore interface {
 	Create(ctx context.Context, req Request) error
 	UpdateStatus(ctx context.Context, requestID string, status Status, claimID int64, failureCode string) error
+	CompareAndUpdateStatus(ctx context.Context, snapshot Request, status Status, claimID int64, failureCode string) (bool, error)
 	Get(ctx context.Context, requestID string) (Request, bool, error)
 	FindByIdempotency(ctx context.Context, couponID, userID int64, idemKey string) (Request, bool, error)
 	ListByStatuses(ctx context.Context, statuses []Status, limit int) ([]Request, error)
