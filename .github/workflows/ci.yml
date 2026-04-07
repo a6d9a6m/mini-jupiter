@@ -46,37 +46,21 @@ jobs:
 
   quan-integration:
     runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: mini_jupiter
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd="redis-cli ping"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=20
     env:
       QUAN_TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4
-      QUAN_TEST_REDIS_ADDR: 127.0.0.1:6379
+      QUAN_TEST_REDIS_MODE: sentinel
+      QUAN_TEST_REDIS_ADDRS: 127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381
+      QUAN_TEST_REDIS_MASTER_NAME: mymaster
+      QUAN_TEST_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/
+      QUAN_TEST_RABBITMQ_CONTAINER: mini-jupiter-rabbitmq
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
+      - name: start quan dependencies
+        run: docker compose up -d mysql rabbitmq redis-master redis-replica redis-sentinel-1 redis-sentinel-2 redis-sentinel-3
       - name: wait mysql
         run: |
           for i in {1..40}; do
@@ -91,7 +75,15 @@ jobs:
             sleep 2
           done
           exit 1
-      - name: quan repository integration tests
-        run: go test ./examples/Quan/internal/coupon -run TestRepository_ -v
-      - name: quan e2e fault injection tests
-        run: go test ./examples/Quan/internal/task -run TestE2E_ -v
+      - name: wait rabbitmq
+        run: |
+          for i in {1..40}; do
+            (echo > /dev/tcp/127.0.0.1/5672) >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: quan current-architecture tests
+        run: go test ./examples/Quan/... -count=1 -v
+      - name: stop quan dependencies
+        if: always()
+        run: docker compose down -v
