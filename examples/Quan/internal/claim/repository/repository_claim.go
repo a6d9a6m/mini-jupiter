@@ -7,7 +7,6 @@ import (
 	"time"
 
 	claimmodel "mini-jupiter/examples/Quan/internal/claim/model"
-	applog "mini-jupiter/pkg/log"
 )
 
 func (r *Repository) ClaimCoupon(ctx context.Context, couponID, userID int64, idemKey string) (claimmodel.Record, error) {
@@ -81,7 +80,7 @@ VALUES
 			IdempotencyKey: idemKey,
 			CreatedAt:      now,
 		}
-		return r.createClaimSideEffectTx(ctx, tx, rec)
+		return nil
 	})
 	if err != nil {
 		return claimmodel.Record{}, err
@@ -118,12 +117,45 @@ func (r *Repository) PersistClaimAfterAdjudication(ctx context.Context, couponID
 		if err := r.deductStock(ctx, tx, couponID, now); err != nil {
 			return err
 		}
-		return r.createClaimSideEffectTx(ctx, tx, rec)
+		return nil
 	})
 	if err != nil {
 		return claimmodel.Record{}, err
 	}
 	return rec, nil
+}
+
+func (r *Repository) PersistClaimAsync(ctx context.Context, couponID, userID int64, idemKey string) (claimmodel.Record, bool, error) {
+	var (
+		rec      claimmodel.Record
+		inserted bool
+	)
+	err := r.txm.WithinTx(ctx, nil, func(ctx context.Context, tx *sql.Tx) error {
+		now := time.Now().UTC()
+		if idemKey != "" {
+			existing, found, err := r.findClaimByIdemTx(ctx, tx, couponID, userID, idemKey)
+			if err != nil {
+				return err
+			}
+			if found {
+				rec = existing
+				inserted = false
+				return nil
+			}
+		}
+
+		created, existing, err := r.insertClaimTx(ctx, tx, couponID, userID, idemKey, now)
+		if err != nil {
+			return err
+		}
+		rec = created
+		inserted = !existing
+		return nil
+	})
+	if err != nil {
+		return claimmodel.Record{}, false, err
+	}
+	return rec, inserted, nil
 }
 
 func (r *Repository) deductStock(ctx context.Context, tx *sql.Tx, couponID int64, now time.Time) error {
@@ -192,18 +224,4 @@ func (r *Repository) resolveDuplicateClaim(ctx context.Context, tx *sql.Tx, coup
 		}
 	}
 	return ErrAlreadyClaimed
-}
-
-func (r *Repository) createClaimSideEffectTx(ctx context.Context, tx *sql.Tx, rec claimmodel.Record) error {
-	if r.sideEffectWriter == nil {
-		return nil
-	}
-	return r.sideEffectWriter.StageClaimCreatedTx(
-		ctx,
-		tx,
-		rec.ID,
-		rec.CouponID,
-		rec.UserID,
-		applog.TraceIDFromContext(ctx),
-	)
 }

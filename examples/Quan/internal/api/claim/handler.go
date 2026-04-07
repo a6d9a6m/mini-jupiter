@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"mini-jupiter/examples/Quan/internal/claim"
+	claimrequest "mini-jupiter/examples/Quan/internal/claim/request"
 	apperr "mini-jupiter/pkg/errors"
 	applog "mini-jupiter/pkg/log"
 )
@@ -19,8 +19,8 @@ const (
 )
 
 type claimService interface {
-	Claim(ctx context.Context, couponID, userID int64, idemKey string) (claim.ClaimRecord, error)
-	GetMyClaim(ctx context.Context, couponID, userID int64) (claim.ClaimRecord, error)
+	Accept(ctx context.Context, req claimrequest.AcceptRequest) (claimrequest.AcceptResponse, error)
+	Get(ctx context.Context, requestID string) (claimrequest.QueryResult, error)
 }
 
 type Handler struct {
@@ -33,7 +33,7 @@ func NewHandler(svc claimService) *Handler {
 }
 
 type claimMetrics interface {
-	ObserveCouponClaim(resultClass, resultCode string, duration time.Duration)
+	ObserveClaimRequestAccept(resultClass, resultCode string, duration time.Duration)
 }
 
 func (h *Handler) SetMetrics(metrics claimMetrics) {
@@ -45,7 +45,7 @@ func (h *Handler) SetMetrics(metrics claimMetrics) {
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/coupons/{coupon_id}/claim", h.claimCoupon)
-	mux.HandleFunc("GET /api/v1/coupons/{coupon_id}/claims/me", h.getMyClaim)
+	mux.HandleFunc("GET /api/v1/claim-requests/{request_id}", h.getRequest)
 }
 
 func (h *Handler) claimCoupon(w http.ResponseWriter, r *http.Request) {
@@ -69,20 +69,21 @@ func (h *Handler) claimCoupon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec, err := h.svc.Claim(r.Context(), couponID, userID, idemKey)
+	accepted, err := h.svc.Accept(r.Context(), claimrequest.AcceptRequest{
+		CouponID:       couponID,
+		UserID:         userID,
+		IdempotencyKey: idemKey,
+	})
 	if err != nil {
 		h.observeClaim(classifyClaimResult(err), classifyClaimCode(err), time.Since(start))
 		apperr.WriteHTTPWithContext(r.Context(), w, err)
 		return
 	}
-	h.observeClaim("success", "success", time.Since(start))
+	h.observeClaim("success", "accepted", time.Since(start))
 
-	writeOK(r.Context(), w, map[string]any{
-		"claim_id":   rec.ID,
-		"coupon_id":  rec.CouponID,
-		"user_id":    rec.UserID,
-		"status":     rec.Status,
-		"claimed_at": rec.CreatedAt.Format(time.RFC3339),
+	writeAccepted(r.Context(), w, map[string]any{
+		"request_id": accepted.RequestID,
+		"status":     accepted.Status,
 	})
 }
 
@@ -90,7 +91,7 @@ func (h *Handler) observeClaim(resultClass, resultCode string, duration time.Dur
 	if h == nil || h.metrics == nil {
 		return
 	}
-	h.metrics.ObserveCouponClaim(resultClass, resultCode, duration)
+	h.metrics.ObserveClaimRequestAccept(resultClass, resultCode, duration)
 }
 
 func classifyClaimResult(err error) string {
@@ -138,28 +139,23 @@ func classifyClaimCode(err error) string {
 	return "internal_error"
 }
 
-func (h *Handler) getMyClaim(w http.ResponseWriter, r *http.Request) {
-	userID, ok := parseUserID(r)
-	if !ok {
-		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "invalid X-User-ID"))
+func (h *Handler) getRequest(w http.ResponseWriter, r *http.Request) {
+	requestID := strings.TrimSpace(r.PathValue("request_id"))
+	if requestID == "" {
+		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "invalid request_id"))
 		return
 	}
-	couponID, ok := parsePathInt64(r.PathValue("coupon_id"))
-	if !ok {
-		apperr.WriteHTTPWithContext(r.Context(), w, apperr.New(apperr.CodeBadRequest, "invalid coupon_id"))
-		return
-	}
-	rec, err := h.svc.GetMyClaim(r.Context(), couponID, userID)
+	result, err := h.svc.Get(r.Context(), requestID)
 	if err != nil {
 		apperr.WriteHTTPWithContext(r.Context(), w, err)
 		return
 	}
 	writeOK(r.Context(), w, map[string]any{
-		"claimed":   true,
-		"claim_id":  rec.ID,
-		"coupon_id": rec.CouponID,
-		"user_id":   rec.UserID,
-		"status":    rec.Status,
+		"request_id":   result.RequestID,
+		"state":        result.State,
+		"internal":     result.Internal,
+		"claim_id":     result.ClaimID,
+		"failure_code": result.FailureCode,
 	})
 }
 
@@ -187,5 +183,20 @@ func writeOK(ctx context.Context, w http.ResponseWriter, data any) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func writeAccepted(ctx context.Context, w http.ResponseWriter, data any) {
+	traceID := applog.TraceIDFromContext(ctx)
+	resp := map[string]any{
+		"code":    0,
+		"message": "accepted",
+		"data":    data,
+	}
+	if traceID != "" {
+		resp["trace_id"] = traceID
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -50,6 +50,9 @@ type ClaimDecision struct {
 	ReservationID string
 }
 
+// Adjudicator 封装了领券热路径在 Redis 上的裁决逻辑。
+// 它负责快速准入、预占状态管理、等待结果和热数据补齐，
+// 但不负责最终的 MySQL 落账。
 type Adjudicator struct {
 	rdb           *goredis.Client
 	pendingTTL    time.Duration
@@ -94,10 +97,18 @@ func (a *Adjudicator) LeaseTTL() time.Duration {
 	return a.leaseTTL
 }
 
+// Decide 是热路径裁决核心。
+// 这里通过一段 Lua 在 Redis 内原子完成：
+// 1. 活动热数据检查
+// 2. 幂等状态检查
+// 3. 库存和单用户领取次数检查
+// 4. 预扣库存、预增用户计数、写入 PENDING 幂等状态和 reservation lease
 func (a *Adjudicator) Decide(ctx context.Context, campaign CampaignSnapshot, userID int64, idemKey string, now time.Time, reservationID string) (ClaimDecision, error) {
 	if a == nil || a.rdb == nil {
 		return ClaimDecision{}, fmt.Errorf("coupon adjudicator redis client is nil")
 	}
+	// 这一段 Lua 是整个热裁决的原子边界：
+	// 要么完整完成准入和预占，要么完全不生效。
 	result, err := a.rdb.Eval(ctx, `
 local stock = redis.call('GET', KEYS[1])
 if not stock then
@@ -189,6 +200,8 @@ return {'ADMITTED', ARGV[3]}
 	return parseClaimDecision(result)
 }
 
+// EnsureCampaign 在 Redis 热数据缺失或不完整时，把 MySQL 里的活动快照补齐进 Redis。
+// 它不会重置已有热状态，只补缺失部分。
 func (a *Adjudicator) EnsureCampaign(ctx context.Context, campaign CampaignSnapshot) error {
 	if a == nil || a.rdb == nil {
 		return fmt.Errorf("coupon adjudicator redis client is nil")
@@ -246,6 +259,8 @@ return 'UNCHANGED'
 	return nil
 }
 
+// WaitResult 用于处理相同幂等键命中的 PENDING 场景。
+// 当前请求会先看幂等结果键，再短暂订阅结果 channel，等待前一个请求 finalize/rollback。
 func (a *Adjudicator) WaitResult(ctx context.Context, couponID, userID int64, idemKey string) (int64, bool, error) {
 	if a == nil || a.rdb == nil {
 		return 0, false, nil
@@ -278,6 +293,8 @@ func (a *Adjudicator) WaitResult(ctx context.Context, couponID, userID int64, id
 	return parseWaitResultValue(msg.Payload)
 }
 
+// degradeWaitResult 把等待结果旁路上的异常降级成“稍后重试”，
+// 避免因为订阅或瞬时网络问题把业务请求直接打成硬失败。
 func (a *Adjudicator) degradeWaitResult(ctx context.Context, couponID, userID int64, msg string, err error) (int64, bool, error) {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return 0, false, nil
@@ -297,6 +314,7 @@ func normalizePerUserLimit(limit int) int {
 	return limit
 }
 
+// parseClaimDecision 把 Redis Lua 返回的字符串数组转换成业务可消费的裁决结果。
 func parseClaimDecision(result []string) (ClaimDecision, error) {
 	if len(result) == 0 {
 		return ClaimDecision{}, fmt.Errorf("empty redis decision result")
@@ -337,6 +355,8 @@ func IdemDecisionResultChannel(couponID, userID int64, idemKey string) string {
 	return fmt.Sprintf("%s:coupon:%d:user:%d:idem:%s:result", DecisionNamespace, couponID, userID, idemKey)
 }
 
+// parseWaitResultValue 只识别 finalize 后写入的 SUCCESS 状态。
+// 对调用方来说，PENDING 或空值都表示“还没有最终结果”。
 func parseWaitResultValue(val string) (int64, bool, error) {
 	if strings.HasPrefix(val, "SUCCESS:") {
 		claimID, convErr := strconv.ParseInt(strings.TrimPrefix(val, "SUCCESS:"), 10, 64)

@@ -13,16 +13,17 @@ import (
 )
 
 type Metrics struct {
-	outboxPendingGauge  prometheus.Gauge
-	taskRetryTotal      prometheus.Counter
-	taskDLQTotal        prometheus.Counter
-	taskConsumeTotal    *prometheus.CounterVec
-	taskFailRateGauge   prometheus.Gauge
-	couponClaimTotal    *prometheus.CounterVec
-	couponClaimLatency  *prometheus.HistogramVec
-	taskRecoveryTotal   *prometheus.CounterVec
-	taskRecoveryLatency *prometheus.HistogramVec
-	appErrorTotal       *prometheus.CounterVec
+	claimRequestAcceptTotal    *prometheus.CounterVec
+	claimRequestAcceptLatency  *prometheus.HistogramVec
+	claimRequestPublishTotal   *prometheus.CounterVec
+	claimRequestPublishLatency *prometheus.HistogramVec
+	claimRequestConsumeTotal   *prometheus.CounterVec
+	claimRequestConsumeLatency *prometheus.HistogramVec
+	claimRequestConsumeFail    prometheus.Gauge
+	claimRequestStateTotal     *prometheus.CounterVec
+	claimRequestReconcileTotal *prometheus.CounterVec
+	claimRequestReconcileLat   *prometheus.HistogramVec
+	appErrorTotal              *prometheus.CounterVec
 
 	consumeSuccess uint64
 	consumeFail    uint64
@@ -41,53 +42,60 @@ func New(namespace string, reg prometheus.Registerer, gatherer prometheus.Gather
 	}
 
 	m := &Metrics{
-		outboxPendingGauge: prometheus.NewGauge(prometheus.GaugeOpts{
+		claimRequestAcceptTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
-			Name:      "outbox_pending",
-			Help:      "Current pending outbox event count.",
-		}),
-		taskRetryTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "task_retry_total",
-			Help:      "Total number of task retries.",
-		}),
-		taskDLQTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "task_dlq_total",
-			Help:      "Total number of tasks moved to DLQ.",
-		}),
-		taskConsumeTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "task_consume_total",
-			Help:      "Total number of task consumption results.",
-		}, []string{"status"}),
-		taskFailRateGauge: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "task_consume_fail_rate",
-			Help:      "Task consume fail ratio (fail/total).",
-		}),
-		couponClaimTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "coupon_claim_total",
-			Help:      "Total number of coupon claim results by normalized outcome.",
+			Name:      "claim_request_accept_total",
+			Help:      "Total number of claim request accept responses by normalized outcome.",
 		}, []string{"result_class", "result_code"}),
-		couponClaimLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		claimRequestAcceptLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
-			Name:      "coupon_claim_duration_seconds",
-			Help:      "Coupon claim request latency in seconds.",
+			Name:      "claim_request_accept_duration_seconds",
+			Help:      "Claim request accept latency in seconds.",
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"result_class"}),
-		taskRecoveryTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+		claimRequestPublishTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
-			Name:      "task_recovery_total",
-			Help:      "Total number of task recoveries by source.",
-		}, []string{"source"}),
-		taskRecoveryLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:      "claim_request_publish_total",
+			Help:      "Total number of request publish attempts by result.",
+		}, []string{"result"}),
+		claimRequestPublishLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
-			Name:      "task_recovery_latency_seconds",
-			Help:      "Latency from task becoming recoverable to compensator rescheduling it.",
+			Name:      "claim_request_publish_duration_seconds",
+			Help:      "Request publish latency in seconds.",
 			Buckets:   prometheus.DefBuckets,
-		}, []string{"source"}),
+		}, []string{"result"}),
+		claimRequestConsumeTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "claim_request_consume_total",
+			Help:      "Total number of request consumer outcomes by result.",
+		}, []string{"result"}),
+		claimRequestConsumeLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "claim_request_consume_duration_seconds",
+			Help:      "Request consumer handling latency in seconds.",
+			Buckets:   prometheus.DefBuckets,
+		}, []string{"result"}),
+		claimRequestConsumeFail: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "claim_request_consume_fail_rate",
+			Help:      "Claim request consume fail ratio (fail/total).",
+		}),
+		claimRequestStateTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "claim_request_state_transition_total",
+			Help:      "Total number of request state transitions by status.",
+		}, []string{"status"}),
+		claimRequestReconcileTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "claim_request_reconcile_total",
+			Help:      "Total number of request reconcile actions by action and result.",
+		}, []string{"action", "result"}),
+		claimRequestReconcileLat: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "claim_request_reconcile_duration_seconds",
+			Help:      "Claim request reconcile action latency in seconds.",
+			Buckets:   prometheus.DefBuckets,
+		}, []string{"action", "result"}),
 		appErrorTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "app_error_total",
@@ -96,15 +104,16 @@ func New(namespace string, reg prometheus.Registerer, gatherer prometheus.Gather
 		gatherer: gatherer,
 	}
 	reg.MustRegister(
-		m.outboxPendingGauge,
-		m.taskRetryTotal,
-		m.taskDLQTotal,
-		m.taskConsumeTotal,
-		m.taskFailRateGauge,
-		m.couponClaimTotal,
-		m.couponClaimLatency,
-		m.taskRecoveryTotal,
-		m.taskRecoveryLatency,
+		m.claimRequestAcceptTotal,
+		m.claimRequestAcceptLatency,
+		m.claimRequestPublishTotal,
+		m.claimRequestPublishLatency,
+		m.claimRequestConsumeTotal,
+		m.claimRequestConsumeLatency,
+		m.claimRequestConsumeFail,
+		m.claimRequestStateTotal,
+		m.claimRequestReconcileTotal,
+		m.claimRequestReconcileLat,
 		m.appErrorTotal,
 	)
 	return m
@@ -117,46 +126,7 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.gatherer, promhttp.HandlerOpts{})
 }
 
-func (m *Metrics) SetOutboxPending(v float64) {
-	if m == nil {
-		return
-	}
-	m.outboxPendingGauge.Set(v)
-}
-
-func (m *Metrics) IncTaskRetry() {
-	if m == nil {
-		return
-	}
-	m.taskRetryTotal.Inc()
-}
-
-func (m *Metrics) IncTaskDLQ() {
-	if m == nil {
-		return
-	}
-	m.taskDLQTotal.Inc()
-}
-
-func (m *Metrics) IncConsumeSuccess() {
-	if m == nil {
-		return
-	}
-	m.taskConsumeTotal.WithLabelValues("success").Inc()
-	atomic.AddUint64(&m.consumeSuccess, 1)
-	m.refreshFailRate()
-}
-
-func (m *Metrics) IncConsumeFailure() {
-	if m == nil {
-		return
-	}
-	m.taskConsumeTotal.WithLabelValues("failed").Inc()
-	atomic.AddUint64(&m.consumeFail, 1)
-	m.refreshFailRate()
-}
-
-func (m *Metrics) ObserveCouponClaim(resultClass, resultCode string, duration time.Duration) {
+func (m *Metrics) ObserveClaimRequestAccept(resultClass, resultCode string, duration time.Duration) {
 	if m == nil {
 		return
 	}
@@ -166,19 +136,61 @@ func (m *Metrics) ObserveCouponClaim(resultClass, resultCode string, duration ti
 	if resultCode == "" {
 		resultCode = "unknown"
 	}
-	m.couponClaimTotal.WithLabelValues(resultClass, resultCode).Inc()
-	m.couponClaimLatency.WithLabelValues(resultClass).Observe(duration.Seconds())
+	m.claimRequestAcceptTotal.WithLabelValues(resultClass, resultCode).Inc()
+	m.claimRequestAcceptLatency.WithLabelValues(resultClass).Observe(duration.Seconds())
 }
 
-func (m *Metrics) ObserveTaskRecovery(source string, latency time.Duration) {
+func (m *Metrics) ObserveClaimRequestPublish(result string, duration time.Duration) {
 	if m == nil {
 		return
 	}
-	if source == "" {
-		source = "unknown"
+	if result == "" {
+		result = "unknown"
 	}
-	m.taskRecoveryTotal.WithLabelValues(source).Inc()
-	m.taskRecoveryLatency.WithLabelValues(source).Observe(latency.Seconds())
+	m.claimRequestPublishTotal.WithLabelValues(result).Inc()
+	m.claimRequestPublishLatency.WithLabelValues(result).Observe(duration.Seconds())
+}
+
+func (m *Metrics) ObserveClaimRequestConsume(result string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	if result == "" {
+		result = "unknown"
+	}
+	m.claimRequestConsumeTotal.WithLabelValues(result).Inc()
+	m.claimRequestConsumeLatency.WithLabelValues(result).Observe(duration.Seconds())
+	switch result {
+	case "succeeded", "rolled_back", "terminal_noop":
+		atomic.AddUint64(&m.consumeSuccess, 1)
+	default:
+		atomic.AddUint64(&m.consumeFail, 1)
+	}
+	m.refreshConsumeFailRate()
+}
+
+func (m *Metrics) IncClaimRequestState(status string) {
+	if m == nil {
+		return
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	m.claimRequestStateTotal.WithLabelValues(status).Inc()
+}
+
+func (m *Metrics) ObserveClaimRequestReconcile(action, result string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	if action == "" {
+		action = "unknown"
+	}
+	if result == "" {
+		result = "unknown"
+	}
+	m.claimRequestReconcileTotal.WithLabelValues(action, result).Inc()
+	m.claimRequestReconcileLat.WithLabelValues(action, result).Observe(duration.Seconds())
 }
 
 func (m *Metrics) ObserveAppError(code int) {
@@ -188,15 +200,15 @@ func (m *Metrics) ObserveAppError(code int) {
 	m.appErrorTotal.WithLabelValues(classifyAppError(code), classifyAppErrorCode(code)).Inc()
 }
 
-func (m *Metrics) refreshFailRate() {
+func (m *Metrics) refreshConsumeFailRate() {
 	fail := atomic.LoadUint64(&m.consumeFail)
 	success := atomic.LoadUint64(&m.consumeSuccess)
 	total := fail + success
 	if total == 0 {
-		m.taskFailRateGauge.Set(0)
+		m.claimRequestConsumeFail.Set(0)
 		return
 	}
-	m.taskFailRateGauge.Set(float64(fail) / float64(total))
+	m.claimRequestConsumeFail.Set(float64(fail) / float64(total))
 }
 
 func classifyAppError(code int) string {

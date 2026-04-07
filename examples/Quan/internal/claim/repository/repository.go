@@ -1,7 +1,6 @@
 package claimrepo
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 
@@ -16,24 +15,18 @@ var (
 	ErrClaimLimitReached = errors.New("claim limit reached")
 )
 
-type sideEffectRecorder interface {
-	StageClaimCreatedTx(ctx context.Context, tx *sql.Tx, claimID, couponID, userID int64, traceID string) error
-}
-
 type Repository struct {
-	db               *sql.DB
-	txm              *mysql.TxManager
-	sideEffectWriter sideEffectRecorder
+	db  *sql.DB
+	txm *mysql.TxManager
 }
 
-func NewRepository(db *sql.DB, txm *mysql.TxManager, sideEffectWriter sideEffectRecorder) *Repository {
+func NewRepository(db *sql.DB, txm *mysql.TxManager) *Repository {
 	if txm == nil {
 		created, _ := mysql.NewTxManager(db)
 		txm = created
 	}
 	return &Repository{
-		db:               db,
-		txm:              txm,
-		sideEffectWriter: sideEffectWriter,
+		db:  db,
+		txm: txm,
 	}
 }

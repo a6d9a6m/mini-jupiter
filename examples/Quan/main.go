@@ -10,18 +10,16 @@ import (
 	"mini-jupiter/examples/Quan/internal/adjudication/hotpath"
 	"mini-jupiter/examples/Quan/internal/adjudication/reservation"
 	claimapi "mini-jupiter/examples/Quan/internal/api/claim"
-	taskapi "mini-jupiter/examples/Quan/internal/api/task"
 	"mini-jupiter/examples/Quan/internal/claim"
+	claimrequest "mini-jupiter/examples/Quan/internal/claim/request"
 	"mini-jupiter/examples/Quan/internal/observability"
-	"mini-jupiter/examples/Quan/internal/outbox"
-	"mini-jupiter/examples/Quan/internal/sideeffect"
-	"mini-jupiter/examples/Quan/internal/task"
 	"mini-jupiter/internal/middleware"
 	"mini-jupiter/pkg/config"
 	apperr "mini-jupiter/pkg/errors"
 	applog "mini-jupiter/pkg/log"
 	"mini-jupiter/pkg/metric"
 	"mini-jupiter/pkg/mysql"
+	"mini-jupiter/pkg/rabbitmq"
 	"mini-jupiter/pkg/redis"
 	"mini-jupiter/pkg/runtime"
 
@@ -39,23 +37,16 @@ type AppConfig struct {
 	Log       applog.Config         `mapstructure:"log" yaml:"log"`
 	Metric    metric.Config         `mapstructure:"metric" yaml:"metric"`
 	Redis     redis.Config          `mapstructure:"redis" yaml:"redis"`
+	RabbitMQ  rabbitmq.Config       `mapstructure:"rabbitmq" yaml:"rabbitmq"`
 	MySQL     mysql.Config          `mapstructure:"mysql" yaml:"mysql"`
 	Migration mysql.MigrationConfig `mapstructure:"migration" yaml:"migration"`
 	Coupon    struct {
 		Claim struct {
 			IdempotencyTTL       time.Duration                           `mapstructure:"idempotency_ttl" yaml:"idempotency_ttl"`
 			ReservationReconcile reservation.ReservationReconcilerConfig `mapstructure:"reservation_reconcile" yaml:"reservation_reconcile"`
-			SideEffectDispatch   sideeffect.DispatchConfig               `mapstructure:"side_effect_dispatch" yaml:"side_effect_dispatch"`
+			RequestMQ            claimrequest.RabbitMQConfig             `mapstructure:"request_mq" yaml:"request_mq"`
 		} `mapstructure:"claim" yaml:"claim"`
 	} `mapstructure:"coupon" yaml:"coupon"`
-	Task struct {
-		Queue        task.QueueConfig        `mapstructure:"queue" yaml:"queue"`
-		Consume      task.ConsumeConfig      `mapstructure:"consume" yaml:"consume"`
-		Compensation task.CompensationConfig `mapstructure:"compensation" yaml:"compensation"`
-	} `mapstructure:"task" yaml:"task"`
-	Outbox struct {
-		Relay outbox.RelayConfig `mapstructure:"relay" yaml:"relay"`
-	} `mapstructure:"outbox" yaml:"outbox"`
 	Middleware struct {
 		Recovery bool `mapstructure:"recovery" yaml:"recovery"`
 		TraceID  bool `mapstructure:"trace_id" yaml:"trace_id"`
@@ -65,9 +56,10 @@ type AppConfig struct {
 
 func main() {
 	var cfg AppConfig
+
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath == "" {
-		configPath = "examples/Quan/config.yaml"
+		configPath = "examples/Quan/config.sample.yaml"
 	}
 	if _, err := config.Load(configPath, &cfg); err != nil {
 		panic(err)
@@ -91,97 +83,83 @@ func main() {
 		applog.L(context.Background()).Fatal("tx manager init failed", zap.Error(err))
 	}
 
-	outboxRepo := outbox.NewRepository(mysqlComp.Client().Raw())
-	taskRepo := task.NewRepository(mysqlComp.Client().Raw(), txm)
-	taskConsumeReceiptRepo := task.NewConsumeReceiptRepository(mysqlComp.Client().Raw())
-	sideEffectRepo := sideeffect.NewRepository(mysqlComp.Client().Raw())
-
-	var redisComp *redis.Component
-	if cfg.Redis.Enabled {
-		c, err := redis.NewComponent(cfg.Redis)
-		if err != nil {
-			applog.L(context.Background()).Fatal("redis init failed", zap.Error(err))
-		}
-		redisComp = c
+	if !cfg.Redis.Enabled {
+		applog.L(context.Background()).Fatal("claim request path requires redis to be enabled")
 	}
-
-	repo := claim.NewRepository(
-		mysqlComp.Client().Raw(),
-		txm,
-		sideEffectRepo,
-	)
-	var redisClient *redis.Client
-	var adjudicator *hotpath.Adjudicator
-	if redisComp != nil {
-		redisClient = redisComp.Client()
-		adjudicator = hotpath.NewAdjudicator(redisClient)
-	}
-	svc := claim.NewServiceWithAdjudicator(repo, adjudicator, cfg.Coupon.Claim.IdempotencyTTL)
-	claimHandler := claimapi.NewHandler(svc)
-
-	var (
-		taskQueue             *task.Queue
-		relayComp             *outbox.Relay
-		consumer              *task.Consumer
-		taskCompensate        *task.Compensator
-		reservationReconciler *reservation.ReservationReconciler
-		sideEffectDispatcher  *sideeffect.Dispatcher
-	)
-	if redisClient != nil {
-		reconciler, err := reservation.NewReservationReconciler(repo, adjudicator, cfg.Coupon.Claim.ReservationReconcile)
-		if err != nil {
-			applog.L(context.Background()).Fatal("coupon reservation reconciler init failed", zap.Error(err))
-		}
-		reservationReconciler = reconciler
-
-		q, err := task.NewQueue(redisClient, cfg.Task.Queue)
-		if err != nil {
-			applog.L(context.Background()).Fatal("task queue init failed", zap.Error(err))
-		}
-		taskQueue = q
-
-		relay, err := outbox.NewRelay(outboxRepo, taskQueue, cfg.Outbox.Relay)
-		if err != nil {
-			applog.L(context.Background()).Fatal("outbox relay init failed", zap.Error(err))
-		}
-		relayComp = relay
-
-		registry := task.NewHandlerRegistry()
-		registry.Register(task.TaskTypeSendCouponNotice, task.NewSendCouponNoticeHandler(taskConsumeReceiptRepo))
-		c, err := task.NewConsumer(taskRepo, taskQueue, registry, cfg.Task.Consume)
-		if err != nil {
-			applog.L(context.Background()).Fatal("task consumer init failed", zap.Error(err))
-		}
-		consumer = c
-
-		compensator, err := task.NewCompensator(taskRepo, taskQueue, cfg.Task.Compensation)
-		if err != nil {
-			applog.L(context.Background()).Fatal("task compensator init failed", zap.Error(err))
-		}
-		taskCompensate = compensator
-	}
-
-	dispatcher, err := sideeffect.NewDispatcher(sideEffectRepo, taskRepo, outboxRepo, cfg.Coupon.Claim.SideEffectDispatch)
+	redisComp, err := redis.NewComponent(cfg.Redis)
 	if err != nil {
-		applog.L(context.Background()).Fatal("coupon side effect dispatcher init failed", zap.Error(err))
+		applog.L(context.Background()).Fatal("redis init failed", zap.Error(err))
 	}
-	sideEffectDispatcher = dispatcher
 
-	taskService := task.NewServiceWithQueue(txm, taskRepo, outboxRepo, taskQueue, cfg.Task.Consume.DefaultMaxRetry)
-	taskHandler := taskapi.NewHandler(taskService)
+	if !cfg.RabbitMQ.Enabled {
+		applog.L(context.Background()).Fatal("claim request path requires rabbitmq to be enabled")
+	}
+	rabbitComp, err := rabbitmq.NewComponent(cfg.RabbitMQ)
+	if err != nil {
+		applog.L(context.Background()).Fatal("rabbitmq init failed", zap.Error(err))
+	}
+
+	repo := claim.NewRepository(mysqlComp.Client().Raw(), txm)
+	redisClient := redisComp.Client()
+	rabbitClient := rabbitComp.Client()
+	adjudicator := hotpath.NewAdjudicator(redisClient)
+
+	requestStore, err := claimrequest.NewRedisRequestStore(redisClient, claimrequest.RequestStoreConfig{
+		WaitReplicas:       1,
+		WaitTimeout:        200 * time.Millisecond,
+		SkipWaitOnStatuses: []claimrequest.Status{claimrequest.StatusEnqueued},
+	})
+	if err != nil {
+		applog.L(context.Background()).Fatal("claim request store init failed", zap.Error(err))
+	}
+	requestPublisher, err := claimrequest.NewRabbitMQPublisher(rabbitClient, cfg.Coupon.Claim.RequestMQ)
+	if err != nil {
+		applog.L(context.Background()).Fatal("claim request publisher init failed", zap.Error(err))
+	}
+
+	admitter := claimrequest.NewRedisAdmitter(repo, adjudicator)
+	acceptSvc := claimrequest.NewAcceptService(admitter, requestStore, requestPublisher)
+	querySvc := claimrequest.NewQueryService(requestStore)
+	claimHandler := claimapi.NewHandler(claimrequest.NewAppService(acceptSvc, querySvc))
+	requestConsumer := claimrequest.NewConsumer(requestStore, claimrequest.NewSQLClaimWriter(repo), admitter)
+	requestReconciler := claimrequest.NewReconciler(
+		requestStore,
+		requestPublisher,
+		admitter,
+		claimrequest.NewSQLClaimLookup(repo),
+		claimrequest.ReconcilePolicy{},
+	)
+
+	requestConsumerComp, err := claimrequest.NewRabbitMQConsumerComponent(
+		rabbitClient,
+		requestConsumer,
+		cfg.Coupon.Claim.RequestMQ,
+	)
+	if err != nil {
+		applog.L(context.Background()).Fatal("claim request consumer init failed", zap.Error(err))
+	}
+	requestReconcilerComp, err := claimrequest.NewReconcilerComponent(
+		requestReconciler,
+		claimrequest.ReconcilerConfig{},
+	)
+	if err != nil {
+		applog.L(context.Background()).Fatal("claim request reconciler init failed", zap.Error(err))
+	}
+	reservationReconciler, err := reservation.NewReservationReconciler(repo, adjudicator, cfg.Coupon.Claim.ReservationReconcile)
+	if err != nil {
+		applog.L(context.Background()).Fatal("coupon reservation reconciler init failed", zap.Error(err))
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("pong"))
 	})
-	var (
-		quanMetrics *observability.Metrics
-		httpMetrics *metric.Metrics
-	)
+
+	var httpMetrics *metric.Metrics
 	if cfg.Metric.Enabled {
 		httpMetrics = metric.New(cfg.Metric)
-		quanMetrics = observability.New(cfg.Metric.Namespace, nil, nil)
+		quanMetrics := observability.New(cfg.Metric.Namespace, nil, nil)
 		apperr.SetReporter(quanMetrics.ObserveAppError)
 		metricPath := cfg.Metric.Path
 		if metricPath == "" {
@@ -189,22 +167,14 @@ func main() {
 		}
 		mux.Handle(metricPath, quanMetrics.Handler())
 		claimHandler.SetMetrics(quanMetrics)
-	}
-	claimHandler.Register(mux)
-	taskHandler.Register(mux)
-	if quanMetrics != nil {
-		if relayComp != nil {
-			relayComp.SetMetrics(quanMetrics)
-		}
-		if consumer != nil {
-			consumer.SetMetrics(quanMetrics)
-		}
-		if taskCompensate != nil {
-			taskCompensate.SetMetrics(quanMetrics)
-		}
+		acceptSvc.SetMetrics(quanMetrics)
+		requestPublisher.SetMetrics(quanMetrics)
+		requestConsumer.SetMetrics(quanMetrics)
+		requestReconciler.SetMetrics(quanMetrics)
 	} else {
 		apperr.SetReporter(nil)
 	}
+	claimHandler.Register(mux)
 
 	var middlewares []middleware.Middleware
 	if cfg.Middleware.Recovery {
@@ -224,26 +194,7 @@ func main() {
 	}
 
 	app := runtime.NewWithOptions(runtime.WithStopTimeout(10 * time.Second))
-	app.Use(mysqlComp, migrationComp)
-	if redisComp != nil {
-		app.Use(redisComp)
-	}
-	if relayComp != nil {
-		app.Use(relayComp)
-	}
-	if consumer != nil {
-		app.Use(consumer)
-	}
-	if taskCompensate != nil {
-		app.Use(taskCompensate)
-	}
-	if reservationReconciler != nil {
-		app.Use(reservationReconciler)
-	}
-	if sideEffectDispatcher != nil {
-		app.Use(sideEffectDispatcher)
-	}
-	app.Use(&httpComponent{server: server})
+	app.Use(mysqlComp, migrationComp, redisComp, rabbitComp, requestConsumerComp, requestReconcilerComp, reservationReconciler, &httpComponent{server: server})
 
 	if err := app.Start(context.Background()); err != nil {
 		applog.L(context.Background()).Fatal("app start failed", zap.Error(err))

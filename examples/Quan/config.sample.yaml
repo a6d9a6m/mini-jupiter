@@ -21,16 +21,30 @@ metric:
 
 redis:
   enabled: true
+  mode: "sentinel"
   addr: "127.0.0.1:6379"
+  addrs:
+    - "127.0.0.1:26379"
+    - "127.0.0.1:26380"
+    - "127.0.0.1:26381"
+  master_name: "mymaster"
   password: ""
+  sentinel_username: ""
+  sentinel_password: ""
   db: 0
   dial_timeout: "2s"
+
+rabbitmq:
+  enabled: true
+  url: "amqp://guest:guest@127.0.0.1:5672/"
+  dial_timeout: "5s"
+  heartbeat: "10s"
 
 mysql:
   enabled: true
   dsn: "root:root@tcp(127.0.0.1:3306)/mini_jupiter?parseTime=true&loc=Local&charset=utf8mb4"
-  max_open_conns: 100
-  max_idle_conns: 10
+  max_open_conns: 400
+  max_idle_conns: 200
   conn_max_lifetime: "30m"
   conn_timeout: "2s"
 
@@ -42,40 +56,18 @@ migration:
 coupon:
   claim:
     idempotency_ttl: "24h"
+    request_mq:
+      exchange: "quan.claim.request"
+      queue: "quan.claim.request.accepted"
+      routing_key: "claim.request.accepted"
+      consumer_tag: "quan-claim-request-consumer"
+      publisher_channels: 16
+      consumer_workers: 16
+      prefetch: 64
+      confirm_timeout: "3s"
+      requeue_delay: "10ms"
     reservation_reconcile:
       enabled: true
       poll_interval: "2s"
       batch_size: 100
-    side_effect_dispatch:
-      enabled: true
-      poll_interval: "2s"
-      batch_size: 100
-      stale_timeout: "30s"
-      retry_delay: "3s"
-      max_retry: 10
     default_per_user_limit: 1
-
-task:
-  queue:
-    ready_key: "queue:task:ready"
-    retry_key: "queue:task:retry"
-    dlq_key: "queue:task:dlq"
-  consume:
-    enabled: true
-    workers: 8
-    max_retry: 5
-    retry_backoff: "2s"
-    poll_interval: "200ms"
-    ready_timeout: "1s"
-    retry_move_batch: 100
-  compensation:
-    enabled: true
-    poll_interval: "1s"
-    batch_size: 100
-
-outbox:
-  relay:
-    enabled: true
-    poll_interval: "500ms"
-    batch_size: 100
-    backoff_base: "1s"
