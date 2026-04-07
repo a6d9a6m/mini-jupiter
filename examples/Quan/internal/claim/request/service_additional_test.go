@@ -459,6 +459,38 @@ func TestReconciler_DoesNotRepublishWhenCompareAndUpdateSkips(t *testing.T) {
 	}
 }
 
+func TestReconciler_PublishFailureLeavesPublishingState(t *testing.T) {
+	stale := time.Now().UTC().Add(-time.Minute)
+	store := newFakeRequestStore()
+	if err := store.Create(context.Background(), Request{
+		ID:             "req-republish-publish-fail",
+		CouponID:       1019,
+		UserID:         2019,
+		IdempotencyKey: "idem-republish-publish-fail",
+		Status:         StatusEnqueued,
+		AcceptedAt:     stale,
+		UpdatedAt:      stale,
+	}); err != nil {
+		t.Fatalf("seed request failed: %v", err)
+	}
+	pub := &fakePublisher{err: errors.New("mq unavailable")}
+	reconciler := NewReconciler(store, pub, &fakeHotPath{}, &fakeClaimLookup{}, ReconcilePolicy{
+		PublishStaleAfter:    time.Second,
+		ProcessingStaleAfter: time.Second,
+	})
+
+	if err := reconciler.ReconcileOnce(context.Background(), 10); err != nil {
+		t.Fatalf("reconcile should leave publishing state on publish failure: %v", err)
+	}
+	req, found, getErr := store.Get(context.Background(), "req-republish-publish-fail")
+	if getErr != nil {
+		t.Fatalf("load request failed: %v", getErr)
+	}
+	if !found || req.Status != StatusPublishing {
+		t.Fatalf("expected request to stay publishing after publish failure, got found=%v req=%+v", found, req)
+	}
+}
+
 type countingHotPath struct {
 	fakeHotPath
 	decideCalls   int

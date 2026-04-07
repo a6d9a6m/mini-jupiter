@@ -93,6 +93,9 @@ func TestRedisRequestStore_UpdateStatusMovesIndexesAndProtectsTerminalState(t *t
 	if got.Status != StatusSucceeded || got.ClaimID != 9102 || got.FailureCode != "" {
 		t.Fatalf("expected terminal request to remain succeeded, got %+v", got)
 	}
+	if got.Version != 3 {
+		t.Fatalf("expected version 3 after two successful transitions, got %d", got.Version)
+	}
 
 	enqueuedIDs, err := client.Raw().ZRange(ctx, store.statusKey(StatusEnqueued), 0, -1).Result()
 	if err != nil {
@@ -274,6 +277,56 @@ func TestRedisRequestStore_UpdateStatusSkipsIllegalRegression(t *testing.T) {
 	}
 	if !found || got.Status != StatusProcessing {
 		t.Fatalf("expected request to remain processing after skipped regression, got found=%v req=%+v", found, got)
+	}
+}
+
+func TestRedisRequestStore_CompareAndUpdateStatusUsesVersion(t *testing.T) {
+	client := quanenv.OpenIntegrationRedis(t, 17)
+	store := newIntegrationRequestStore(t, client, "store-version-cas")
+	ctx := context.Background()
+
+	req := Request{
+		ID:             "req-store-version-cas",
+		CouponID:       1107,
+		UserID:         2107,
+		IdempotencyKey: "idem-store-version-cas",
+		ReservationID:  "res-store-version-cas",
+		Status:         StatusEnqueued,
+	}
+	if err := store.Create(ctx, req); err != nil {
+		t.Fatalf("create request failed: %v", err)
+	}
+	snapshot, found, err := store.Get(ctx, req.ID)
+	if err != nil || !found {
+		t.Fatalf("load request failed: found=%v err=%v", found, err)
+	}
+	if snapshot.Version != 1 {
+		t.Fatalf("expected initial version 1, got %d", snapshot.Version)
+	}
+	if err := store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""); err != nil {
+		t.Fatalf("refresh enqueued status failed: %v", err)
+	}
+	current, found, err := store.Get(ctx, req.ID)
+	if err != nil || !found {
+		t.Fatalf("reload request failed: found=%v err=%v", found, err)
+	}
+	if current.Version != 2 {
+		t.Fatalf("expected version 2 after same-status refresh, got %d", current.Version)
+	}
+
+	applied, err := store.CompareAndUpdateStatus(ctx, snapshot, StatusPublishing, 0, "")
+	if err != nil {
+		t.Fatalf("compare-and-update with stale version should not error, got %v", err)
+	}
+	if applied {
+		t.Fatal("expected stale version compare-and-update to be rejected")
+	}
+	current, found, err = store.Get(ctx, req.ID)
+	if err != nil || !found {
+		t.Fatalf("reload request after stale cas failed: found=%v err=%v", found, err)
+	}
+	if current.Status != StatusEnqueued || current.Version != 2 {
+		t.Fatalf("expected request to remain enqueued with version 2, got %+v", current)
 	}
 }
 
