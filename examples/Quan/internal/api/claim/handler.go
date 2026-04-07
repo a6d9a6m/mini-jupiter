@@ -84,6 +84,7 @@ func (h *Handler) claimCoupon(w http.ResponseWriter, r *http.Request) {
 	writeAccepted(r.Context(), w, map[string]any{
 		"request_id": accepted.RequestID,
 		"status":     accepted.Status,
+		"warning":    accepted.Warning,
 	})
 }
 

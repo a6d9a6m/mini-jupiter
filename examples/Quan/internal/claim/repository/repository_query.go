@@ -66,7 +66,16 @@ FOR UPDATE
 func (r *Repository) LoadCampaign(ctx context.Context, couponID int64) (hotpath.CampaignSnapshot, error) {
 	var campaign hotpath.CampaignSnapshot
 	err := r.db.QueryRowContext(ctx, `
-SELECT status, available_stock, per_user_limit, start_at, end_at
+SELECT
+	status,
+	GREATEST(total_stock - (
+		SELECT COUNT(1)
+		FROM coupon_claims cc
+		WHERE cc.coupon_id = coupon_campaigns.coupon_id
+	), 0) AS derived_available_stock,
+	per_user_limit,
+	start_at,
+	end_at
 FROM coupon_campaigns
 WHERE coupon_id = ?
 LIMIT 1

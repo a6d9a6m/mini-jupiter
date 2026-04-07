@@ -23,25 +23,26 @@ func (a *Adjudicator) Finalize(ctx context.Context, couponID, userID int64, idem
 	if a == nil || a.rdb == nil {
 		return nil
 	}
+	successValue := fmt.Sprintf("SUCCESS:%d:%s", claimID, reservationID)
 	_, err := a.rdb.Eval(ctx, `
 local state = redis.call('HGET', KEYS[2], 'state')
 local current = redis.call('GET', KEYS[1])
-if state == false and current == 'SUCCESS:' .. ARGV[2] then
+if state == false and current == ARGV[6] then
   return 1
 end
 if state ~= 'LEASED' and state ~= 'FINALIZED' then
   return 0
 end
-if current and current ~= 'PENDING:' .. ARGV[1] and current ~= 'SUCCESS:' .. ARGV[2] then
+if current and current ~= 'PENDING:' .. ARGV[1] and current ~= ARGV[6] then
   return 0
 end
 if current == false or current == 'PENDING:' .. ARGV[1] then
-  redis.call('SET', KEYS[1], 'SUCCESS:' .. ARGV[2], 'PX', ARGV[3])
+  redis.call('SET', KEYS[1], ARGV[6], 'PX', ARGV[3])
 end
 redis.call('HSET', KEYS[2], 'state', 'FINALIZED', 'claim_id', ARGV[2], 'lease_until_ms', ARGV[4])
 redis.call('PEXPIRE', KEYS[2], ARGV[5])
 redis.call('ZREM', KEYS[3], ARGV[1])
-redis.call('PUBLISH', KEYS[4], 'SUCCESS:' .. ARGV[2])
+redis.call('PUBLISH', KEYS[4], ARGV[6])
 return 1
 `, []string{
 		IdemDecisionKey(couponID, userID, idemKey),
@@ -53,6 +54,7 @@ return 1
 		a.successTTL.Milliseconds(),
 		time.Now().UTC().Add(a.successTTL).UnixMilli(),
 		a.leaseStateTTL.Milliseconds(),
+		successValue,
 	).Result()
 	return err
 }

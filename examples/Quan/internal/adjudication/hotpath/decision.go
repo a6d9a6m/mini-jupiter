@@ -48,6 +48,7 @@ type ClaimDecision struct {
 	Code          string
 	ClaimID       int64
 	ReservationID string
+	RequestID     string
 }
 
 // Adjudicator 封装了领券热路径在 Redis 上的裁决逻辑。
@@ -125,7 +126,14 @@ local idem_val = redis.call('GET', KEYS[4])
 
 if idem_val then
   if string.sub(idem_val, 1, 8) == 'SUCCESS:' then
-    return {'IDEM_HIT', string.sub(idem_val, 9)}
+    local payload = string.sub(idem_val, 9)
+    local first_sep = string.find(payload, ':')
+    if first_sep then
+      local claim_id = string.sub(payload, 1, first_sep - 1)
+      local request_id = string.sub(payload, first_sep + 1)
+      return {'IDEM_HIT', claim_id, request_id}
+    end
+    return {'IDEM_HIT', payload}
   end
   if string.sub(idem_val, 1, 8) == 'PENDING:' then
     return {'PENDING', string.sub(idem_val, 9)}
@@ -206,6 +214,19 @@ func (a *Adjudicator) EnsureCampaign(ctx context.Context, campaign CampaignSnaps
 	if a == nil || a.rdb == nil {
 		return fmt.Errorf("coupon adjudicator redis client is nil")
 	}
+	repairedStock := campaign.AvailableStock
+	if stockExists, err := a.rdb.Exists(ctx, CampaignStockKey(campaign.CouponID)).Result(); err != nil {
+		return err
+	} else if stockExists == 0 {
+		activeReservations, countErr := a.countActiveReservations(ctx, campaign.CouponID, time.Now().UTC())
+		if countErr != nil {
+			return countErr
+		}
+		repairedStock -= activeReservations
+		if repairedStock < 0 {
+			repairedStock = 0
+		}
+	}
 	result, err := a.rdb.Eval(ctx, `
 local stock_exists = redis.call('EXISTS', KEYS[1]) == 1
 local meta = redis.call('HMGET', KEYS[2], 'status', 'start_ms', 'end_ms', 'per_user_limit')
@@ -240,7 +261,7 @@ return 'UNCHANGED'
 		CampaignStockKey(campaign.CouponID),
 		CampaignMetaKey(campaign.CouponID),
 	},
-		campaign.AvailableStock,
+		repairedStock,
 		campaign.Status,
 		campaign.StartAt.UTC().UnixMilli(),
 		campaign.EndAt.UTC().UnixMilli(),
@@ -257,6 +278,38 @@ return 'UNCHANGED'
 		)
 	}
 	return nil
+}
+
+func (a *Adjudicator) countActiveReservations(ctx context.Context, couponID int64, now time.Time) (int, error) {
+	ids, err := a.rdb.ZRange(ctx, ReservationLeaseIndexKey(), 0, -1).Result()
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, reservationID := range ids {
+		fields, leaseErr := a.rdb.HGetAll(ctx, ReservationLeaseKey(reservationID)).Result()
+		if leaseErr != nil {
+			return 0, leaseErr
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		lease, parseErr := parseReservationLease(fields)
+		if parseErr != nil {
+			return 0, fmt.Errorf("parse reservation lease %s: %w", reservationID, parseErr)
+		}
+		if lease.CouponID != couponID {
+			continue
+		}
+		if lease.State != "LEASED" {
+			continue
+		}
+		if !lease.LeaseUntil.After(now) {
+			continue
+		}
+		count++
+	}
+	return count, nil
 }
 
 // WaitResult 用于处理相同幂等键命中的 PENDING 场景。
@@ -328,6 +381,9 @@ func parseClaimDecision(result []string) (ClaimDecision, error) {
 				return ClaimDecision{}, fmt.Errorf("parse redis decision claim id: %w", err)
 			}
 			out.ClaimID = claimID
+			if len(result) > 2 {
+				out.RequestID = result[2]
+			}
 		case DecisionCodeAdmitted, DecisionCodePending:
 			out.ReservationID = result[1]
 		}
@@ -359,7 +415,11 @@ func IdemDecisionResultChannel(couponID, userID int64, idemKey string) string {
 // 对调用方来说，PENDING 或空值都表示“还没有最终结果”。
 func parseWaitResultValue(val string) (int64, bool, error) {
 	if strings.HasPrefix(val, "SUCCESS:") {
-		claimID, convErr := strconv.ParseInt(strings.TrimPrefix(val, "SUCCESS:"), 10, 64)
+		payload := strings.TrimPrefix(val, "SUCCESS:")
+		if idx := strings.IndexByte(payload, ':'); idx >= 0 {
+			payload = payload[:idx]
+		}
+		claimID, convErr := strconv.ParseInt(payload, 10, 64)
 		if convErr != nil {
 			return 0, false, fmt.Errorf("invalid success claim id: %w", convErr)
 		}

@@ -32,6 +32,41 @@ type noopAcceptMetrics struct{}
 
 func (noopAcceptMetrics) IncClaimRequestState(string) {}
 
+const durabilityPendingWarning = "accepted_without_replica_confirmation"
+
+func acceptDurabilityWarning(err error) (string, error) {
+	if err == nil {
+		return "", nil
+	}
+	if _, ok := AsDurabilityPendingError(err); ok {
+		return durabilityPendingWarning, nil
+	}
+	return "", err
+}
+
+func ignoreDurabilityPending(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := AsDurabilityPendingError(err); ok {
+		return nil
+	}
+	return err
+}
+
+func classifyStatusUpdate(err error) (applied bool, warning string, normalized error) {
+	if err == nil {
+		return true, "", nil
+	}
+	if _, ok := AsDurabilityPendingError(err); ok {
+		return true, durabilityPendingWarning, nil
+	}
+	if _, ok := AsTransitionSkippedError(err); ok {
+		return false, "", nil
+	}
+	return false, "", err
+}
+
 func (s *AcceptService) SetMetrics(metrics acceptMetrics) {
 	if s == nil || metrics == nil {
 		return
@@ -68,6 +103,10 @@ func (s *AcceptService) Accept(ctx context.Context, req AcceptRequest) (AcceptRe
 		recordAcceptTiming(ctx, "decide_error", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
 		return AcceptResponse{}, err
 	}
+	if decision.Code == DecisionCodeIdemHit {
+		recordAcceptTiming(ctx, "idem_hit_from_hotpath", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
+		return AcceptResponse{RequestID: decision.RequestID, Status: StatusProcessing}, nil
+	}
 	if decision.Code != DecisionCodeAdmitted {
 		recordAcceptTiming(ctx, "rejected", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
 		return AcceptResponse{}, errors.New("request rejected")
@@ -82,9 +121,19 @@ func (s *AcceptService) Accept(ctx context.Context, req AcceptRequest) (AcceptRe
 		Status:         StatusAccepted,
 	}
 	stageStart = time.Now()
-	if err := s.store.Create(ctx, record); err != nil {
+	respWarning := ""
+	createErr := s.store.Create(ctx, record)
+	if createErr != nil {
 		createDur = time.Since(stageStart)
-		if errors.Is(err, ErrRequestExists) {
+		if warning, normalizedErr := acceptDurabilityWarning(createErr); normalizedErr == nil {
+			if warning != "" {
+				respWarning = warning
+			}
+			createErr = nil
+		}
+	}
+	if createErr != nil {
+		if errors.Is(createErr, ErrRequestExists) {
 			existing, found, findErr := s.store.FindByIdempotency(ctx, req.CouponID, req.UserID, req.IdempotencyKey)
 			if findErr != nil {
 				recordAcceptTiming(ctx, "create_exists_find_error", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
@@ -96,7 +145,7 @@ func (s *AcceptService) Accept(ctx context.Context, req AcceptRequest) (AcceptRe
 			}
 		}
 		recordAcceptTiming(ctx, "create_error", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
-		return AcceptResponse{}, err
+		return AcceptResponse{}, createErr
 	}
 	createDur = time.Since(stageStart)
 	s.metrics.IncClaimRequestState(string(StatusAccepted))
@@ -105,27 +154,47 @@ func (s *AcceptService) Accept(ctx context.Context, req AcceptRequest) (AcceptRe
 	if err := s.publisher.PublishAccepted(ctx, record); err != nil {
 		publishDur = time.Since(stageStart)
 		stageStart = time.Now()
-		if updateErr := s.store.UpdateStatus(ctx, record.ID, StatusPublishing, 0, ""); updateErr != nil {
+		updateErr := s.store.UpdateStatus(ctx, record.ID, StatusPublishing, 0, "")
+		if applied, warning, normalizedErr := classifyStatusUpdate(updateErr); normalizedErr == nil {
+			if warning != "" {
+				respWarning = warning
+			}
+			updateErr = nil
+			if applied {
+				s.metrics.IncClaimRequestState(string(StatusPublishing))
+			}
+		}
+		if updateErr != nil {
 			markEnqueueDur = time.Since(stageStart)
 			recordAcceptTiming(ctx, "publish_error_mark_error", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
 			return AcceptResponse{}, updateErr
 		}
 		markEnqueueDur = time.Since(stageStart)
-		s.metrics.IncClaimRequestState(string(StatusPublishing))
 		recordAcceptTiming(ctx, "publish_error", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
-		return AcceptResponse{RequestID: record.ID, Status: StatusPublishing}, nil
+		return AcceptResponse{RequestID: record.ID, Status: StatusPublishing, Warning: respWarning}, nil
 	}
 	publishDur = time.Since(stageStart)
 	stageStart = time.Now()
-	if err := s.store.UpdateStatus(ctx, record.ID, StatusEnqueued, 0, ""); err != nil {
+	updateErr := s.store.UpdateStatus(ctx, record.ID, StatusEnqueued, 0, "")
+	applied := false
+	if a, warning, normalizedErr := classifyStatusUpdate(updateErr); normalizedErr == nil {
+		applied = a
+		if warning != "" {
+			respWarning = warning
+		}
+		updateErr = nil
+	}
+	if updateErr != nil {
 		markEnqueueDur = time.Since(stageStart)
 		recordAcceptTiming(ctx, "mark_enqueued_error", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
-		return AcceptResponse{}, err
+		return AcceptResponse{}, updateErr
 	}
 	markEnqueueDur = time.Since(stageStart)
-	s.metrics.IncClaimRequestState(string(StatusEnqueued))
+	if applied {
+		s.metrics.IncClaimRequestState(string(StatusEnqueued))
+	}
 	recordAcceptTiming(ctx, "accepted", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
-	return AcceptResponse{RequestID: record.ID, Status: StatusEnqueued}, nil
+	return AcceptResponse{RequestID: record.ID, Status: StatusEnqueued, Warning: respWarning}, nil
 }
 
 type Consumer struct {
@@ -182,9 +251,14 @@ func (c *Consumer) ConsumeAccepted(ctx context.Context, requestID string) error 
 		result = "terminal_noop"
 		return nil
 	}
-	if err := c.store.UpdateStatus(ctx, requestID, StatusProcessing, 0, ""); err != nil {
+	applied, _, err := classifyStatusUpdate(c.store.UpdateStatus(ctx, requestID, StatusProcessing, 0, ""))
+	if err != nil {
 		result = "mark_processing_error"
 		return err
+	}
+	if !applied {
+		result = "processing_transition_skipped"
+		return nil
 	}
 	c.metrics.IncClaimRequestState(string(StatusProcessing))
 
@@ -198,11 +272,14 @@ func (c *Consumer) ConsumeAccepted(ctx context.Context, requestID string) error 
 			result = "rollback_error"
 			return rollbackErr
 		}
-		if updateErr := c.store.UpdateStatus(ctx, requestID, StatusRolledBack, 0, err.Error()); updateErr != nil {
+		applied, _, updateErr := classifyStatusUpdate(c.store.UpdateStatus(ctx, requestID, StatusRolledBack, 0, err.Error()))
+		if updateErr != nil {
 			result = "mark_rolled_back_error"
 			return updateErr
 		}
-		c.metrics.IncClaimRequestState(string(StatusRolledBack))
+		if applied {
+			c.metrics.IncClaimRequestState(string(StatusRolledBack))
+		}
 		result = "rolled_back"
 		return nil
 	}
@@ -210,11 +287,14 @@ func (c *Consumer) ConsumeAccepted(ctx context.Context, requestID string) error 
 		result = "finalize_error"
 		return err
 	}
-	if err := c.store.UpdateStatus(ctx, requestID, StatusSucceeded, claimID, ""); err != nil {
+	applied, _, err = classifyStatusUpdate(c.store.UpdateStatus(ctx, requestID, StatusSucceeded, claimID, ""))
+	if err != nil {
 		result = "mark_succeeded_error"
 		return err
 	}
-	c.metrics.IncClaimRequestState(string(StatusSucceeded))
+	if applied {
+		c.metrics.IncClaimRequestState(string(StatusSucceeded))
+	}
 	result = "succeeded"
 	return nil
 }
@@ -334,12 +414,15 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context, limit int) error {
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				continue
 			}
-			if err := r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""); err != nil {
+			applied, _, err := classifyStatusUpdate(r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""))
+			if err != nil {
 				result = "mark_enqueued_error"
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				return err
 			}
-			r.metrics.IncClaimRequestState(string(StatusEnqueued))
+			if applied {
+				r.metrics.IncClaimRequestState(string(StatusEnqueued))
+			}
 			result = "succeeded"
 		case StatusEnqueued:
 			action = "enqueued_republish"
@@ -352,12 +435,15 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context, limit int) error {
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				continue
 			}
-			if err := r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""); err != nil {
+			applied, _, err := classifyStatusUpdate(r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""))
+			if err != nil {
 				result = "mark_enqueued_error"
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				return err
 			}
-			r.metrics.IncClaimRequestState(string(StatusEnqueued))
+			if applied {
+				r.metrics.IncClaimRequestState(string(StatusEnqueued))
+			}
 			result = "succeeded"
 		case StatusProcessing:
 			if now.Sub(req.UpdatedAt) < r.policy.ProcessingStaleAfter {
@@ -377,12 +463,15 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context, limit int) error {
 					r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 					return err
 				}
-				if err := r.store.UpdateStatus(ctx, req.ID, StatusSucceeded, claimID, ""); err != nil {
+				applied, _, err := classifyStatusUpdate(r.store.UpdateStatus(ctx, req.ID, StatusSucceeded, claimID, ""))
+				if err != nil {
 					result = "mark_succeeded_error"
 					r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 					return err
 				}
-				r.metrics.IncClaimRequestState(string(StatusSucceeded))
+				if applied {
+					r.metrics.IncClaimRequestState(string(StatusSucceeded))
+				}
 				result = "succeeded"
 				continue
 			}
@@ -392,12 +481,15 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context, limit int) error {
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				continue
 			}
-			if err := r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""); err != nil {
+			applied, _, err := classifyStatusUpdate(r.store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, ""))
+			if err != nil {
 				result = "mark_enqueued_error"
 				r.metrics.ObserveClaimRequestReconcile(action, result, time.Since(actionStartedAt))
 				return err
 			}
-			r.metrics.IncClaimRequestState(string(StatusEnqueued))
+			if applied {
+				r.metrics.IncClaimRequestState(string(StatusEnqueued))
+			}
 			result = "succeeded"
 		}
 		if action != "" {

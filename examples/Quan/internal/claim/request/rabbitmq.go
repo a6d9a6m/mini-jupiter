@@ -184,6 +184,7 @@ func (p *RabbitMQPublisher) PublishAccepted(ctx context.Context, req Request) er
 			return fmt.Errorf("rabbitmq publish confirmation channel closed")
 		}
 		if !confirm.Ack {
+			healthy = false
 			result = "publish_nack"
 			recordPublishTiming(ctx, "publish_nack", acquireChannelDur, declareTopologyDur, sendPublishDur, waitConfirmDur, time.Since(startedAt))
 			return fmt.Errorf("rabbitmq publish was nacked")
@@ -193,6 +194,7 @@ func (p *RabbitMQPublisher) PublishAccepted(ctx context.Context, req Request) er
 		return nil
 	case <-waitCtx.Done():
 		waitConfirmDur = time.Since(stageStart)
+		healthy = false
 		result = "confirm_timeout"
 		recordPublishTiming(ctx, "confirm_timeout", acquireChannelDur, declareTopologyDur, sendPublishDur, waitConfirmDur, time.Since(startedAt))
 		return waitCtx.Err()

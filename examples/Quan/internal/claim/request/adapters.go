@@ -52,7 +52,10 @@ func (a *RedisAdmitter) Decide(ctx context.Context, couponID, userID int64, idem
 		case hotpath.DecisionCodePending:
 			return Decision{}, apperr.New(apperr.CodeTooManyRequests, "request is still being processed")
 		case hotpath.DecisionCodeIdemHit:
-			return Decision{}, apperr.New(apperr.CodeTooManyRequests, "request result should be polled by request_id")
+			if decision.RequestID == "" {
+				return Decision{}, apperr.New(apperr.CodeTooManyRequests, "request is still being processed")
+			}
+			return Decision{Code: DecisionCodeIdemHit, RequestID: decision.RequestID}, nil
 		case hotpath.DecisionCodeAlready:
 			return Decision{}, apperr.New(apperr.CodeConflict, "already claimed")
 		case hotpath.DecisionCodeLimit:

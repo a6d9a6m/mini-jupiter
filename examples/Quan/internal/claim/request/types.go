@@ -14,6 +14,59 @@ type RetryableError struct {
 	Err error
 }
 
+type TransitionSkippedError struct {
+	RequestID string
+	Current   Status
+	Target    Status
+}
+
+func (e TransitionSkippedError) Error() string {
+	return "request status transition skipped"
+}
+
+type DurabilityPendingError struct {
+	RequestID string
+	Status    Status
+	Err       error
+}
+
+func (e DurabilityPendingError) Error() string {
+	if e.Err == nil {
+		return "replica confirmation pending"
+	}
+	return e.Err.Error()
+}
+
+func (e DurabilityPendingError) Unwrap() error {
+	return e.Err
+}
+
+func IsDurabilityPendingError(err error) bool {
+	var target DurabilityPendingError
+	return errors.As(err, &target)
+}
+
+func AsDurabilityPendingError(err error) (DurabilityPendingError, bool) {
+	var target DurabilityPendingError
+	if !errors.As(err, &target) {
+		return DurabilityPendingError{}, false
+	}
+	return target, true
+}
+
+func IsTransitionSkippedError(err error) bool {
+	var target TransitionSkippedError
+	return errors.As(err, &target)
+}
+
+func AsTransitionSkippedError(err error) (TransitionSkippedError, bool) {
+	var target TransitionSkippedError
+	if !errors.As(err, &target) {
+		return TransitionSkippedError{}, false
+	}
+	return target, true
+}
+
 func (e RetryableError) Error() string {
 	if e.Err == nil {
 		return "retryable error"
@@ -54,6 +107,7 @@ type DecisionCode string
 
 const (
 	DecisionCodeAdmitted DecisionCode = "ADMITTED"
+	DecisionCodeIdemHit  DecisionCode = "IDEM_HIT"
 	DecisionCodeRejected DecisionCode = "REJECTED"
 )
 
@@ -66,6 +120,7 @@ type AcceptRequest struct {
 type AcceptResponse struct {
 	RequestID string
 	Status    Status
+	Warning   string
 }
 
 type Decision struct {
