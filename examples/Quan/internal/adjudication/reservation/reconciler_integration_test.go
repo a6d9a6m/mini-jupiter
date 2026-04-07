@@ -138,7 +138,7 @@ func TestReservationReconciler_FinalizesExpiredLeaseWhenClaimWasPersisted(t *tes
 		t.Fatalf("reconcile once failed: %v", err)
 	}
 
-	if got := quanenv.LoadRedisString(t, redisClient, hotpath.IdemDecisionKey(couponID, 95001, "lease-finalize")); got != fmt.Sprintf("SUCCESS:%d", rec.ID) {
+	if got := quanenv.LoadRedisString(t, redisClient, hotpath.IdemDecisionKey(couponID, 95001, "lease-finalize")); got != fmt.Sprintf("SUCCESS:%d:%s", rec.ID, decision.ReservationID) {
 		t.Fatalf("expected success idem value after reconcile, got %q", got)
 	}
 	if got := quanenv.LoadRedisCampaignStock(t, redisClient, couponID, hotpath.CampaignStockKey); got != 2 {

@@ -128,3 +128,86 @@ func TestAdjudicator_WaitResult_CanceledContextDegradesToNoResult(t *testing.T) 
 		t.Fatalf("expected zero claim id for canceled wait, got %d", claimID)
 	}
 }
+
+func TestAdjudicator_DecideReturnsRequestIDOnIdemHitAfterFinalize(t *testing.T) {
+	redisClient := quanenv.OpenIntegrationRedis(t, 3)
+	ctx := context.Background()
+
+	adjudicator := NewAdjudicator(redisClient)
+	couponID := quanenv.NextCouponID()
+	now := time.Now().UTC()
+	campaign := CampaignSnapshot{
+		CouponID:       couponID,
+		Status:         "ACTIVE",
+		AvailableStock: 3,
+		PerUserLimit:   1,
+		StartAt:        now.Add(-time.Hour),
+		EndAt:          now.Add(time.Hour),
+	}
+	if err := adjudicator.EnsureCampaign(ctx, campaign); err != nil {
+		t.Fatalf("ensure campaign failed: %v", err)
+	}
+
+	decision, err := adjudicator.Decide(ctx, campaign, 94004, "idem-request-id", now, "idem-request-id-reservation")
+	if err != nil {
+		t.Fatalf("decide failed: %v", err)
+	}
+	if decision.Code != DecisionCodeAdmitted {
+		t.Fatalf("expected admitted decision, got %q", decision.Code)
+	}
+	if err := adjudicator.Finalize(ctx, couponID, 94004, "idem-request-id", decision.ReservationID, 991122); err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+
+	replay, err := adjudicator.Decide(ctx, campaign, 94004, "idem-request-id", now, "another-reservation-id")
+	if err != nil {
+		t.Fatalf("replay decide failed: %v", err)
+	}
+	if replay.Code != DecisionCodeIdemHit {
+		t.Fatalf("expected idem hit on replay, got %q", replay.Code)
+	}
+	if replay.ClaimID != 991122 {
+		t.Fatalf("expected replay claim id 991122, got %d", replay.ClaimID)
+	}
+	if replay.RequestID != decision.ReservationID {
+		t.Fatalf("expected replay request id %q, got %q", decision.ReservationID, replay.RequestID)
+	}
+}
+
+func TestAdjudicator_EnsureCampaign_RestoresMissingStockAfterSubtractingActiveReservations(t *testing.T) {
+	redisClient := quanenv.OpenIntegrationRedis(t, 3)
+	ctx := context.Background()
+
+	adjudicator := NewAdjudicator(redisClient)
+	couponID := quanenv.NextCouponID()
+	now := time.Now().UTC()
+	campaign := CampaignSnapshot{
+		CouponID:       couponID,
+		Status:         "ACTIVE",
+		AvailableStock: 3,
+		PerUserLimit:   1,
+		StartAt:        now.Add(-time.Hour),
+		EndAt:          now.Add(time.Hour),
+	}
+	if err := adjudicator.EnsureCampaign(ctx, campaign); err != nil {
+		t.Fatalf("ensure campaign failed: %v", err)
+	}
+
+	decision, err := adjudicator.Decide(ctx, campaign, 94005, "repair-stock-active-lease", now, "repair-stock-active-lease-reservation")
+	if err != nil {
+		t.Fatalf("decide failed: %v", err)
+	}
+	if decision.Code != DecisionCodeAdmitted {
+		t.Fatalf("expected admitted decision, got %q", decision.Code)
+	}
+	if err := redisClient.Raw().Del(ctx, CampaignStockKey(couponID)).Err(); err != nil {
+		t.Fatalf("delete stock key failed: %v", err)
+	}
+
+	if err := adjudicator.EnsureCampaign(ctx, campaign); err != nil {
+		t.Fatalf("ensure campaign after stock loss failed: %v", err)
+	}
+	if got := quanenv.LoadRedisCampaignStock(t, redisClient, couponID, CampaignStockKey); got != 2 {
+		t.Fatalf("expected repaired stock 2 after subtracting active reservation, got %d", got)
+	}
+}

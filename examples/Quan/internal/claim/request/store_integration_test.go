@@ -193,6 +193,90 @@ func TestRedisRequestStore_CreateRejectsDuplicateIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestRedisRequestStore_CreateReturnsDurabilityPendingButPersistsRequest(t *testing.T) {
+	client := quanenv.OpenIntegrationRedis(t, 15)
+	store, err := NewRedisRequestStore(client, RequestStoreConfig{
+		Prefix:       "itest:store-wait-pending:" + time.Now().UTC().Format("150405.000000000"),
+		TTL:          time.Hour,
+		WaitReplicas: 1,
+		WaitTimeout:  20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new redis request store failed: %v", err)
+	}
+	ctx := context.Background()
+
+	req := Request{
+		ID:             "req-store-wait-pending",
+		CouponID:       1105,
+		UserID:         2105,
+		IdempotencyKey: "idem-store-wait-pending",
+		ReservationID:  "res-store-wait-pending",
+		Status:         StatusAccepted,
+	}
+	err = store.Create(ctx, req)
+	pending, ok := AsDurabilityPendingError(err)
+	if !ok {
+		t.Fatalf("expected DurabilityPendingError, got %v", err)
+	}
+	if pending.RequestID != req.ID || pending.Status != StatusAccepted {
+		t.Fatalf("unexpected durability pending payload: %+v", pending)
+	}
+
+	got, found, getErr := store.Get(ctx, req.ID)
+	if getErr != nil {
+		t.Fatalf("get request failed: %v", getErr)
+	}
+	if !found || got.Status != StatusAccepted {
+		t.Fatalf("expected request to be persisted despite wait shortfall, got found=%v req=%+v", found, got)
+	}
+	byIdem, found, findErr := store.FindByIdempotency(ctx, req.CouponID, req.UserID, req.IdempotencyKey)
+	if findErr != nil {
+		t.Fatalf("find by idempotency failed: %v", findErr)
+	}
+	if !found || byIdem.ID != req.ID {
+		t.Fatalf("expected idempotency index to remain intact, got found=%v req=%+v", found, byIdem)
+	}
+}
+
+func TestRedisRequestStore_UpdateStatusSkipsIllegalRegression(t *testing.T) {
+	client := quanenv.OpenIntegrationRedis(t, 16)
+	store := newIntegrationRequestStore(t, client, "store-skip-regression")
+	ctx := context.Background()
+
+	req := Request{
+		ID:             "req-store-skip-regression",
+		CouponID:       1106,
+		UserID:         2106,
+		IdempotencyKey: "idem-store-skip-regression",
+		ReservationID:  "res-store-skip-regression",
+		Status:         StatusEnqueued,
+	}
+	if err := store.Create(ctx, req); err != nil {
+		t.Fatalf("create request failed: %v", err)
+	}
+	if err := store.UpdateStatus(ctx, req.ID, StatusProcessing, 0, ""); err != nil {
+		t.Fatalf("mark processing failed: %v", err)
+	}
+
+	err := store.UpdateStatus(ctx, req.ID, StatusEnqueued, 0, "")
+	skipped, ok := AsTransitionSkippedError(err)
+	if !ok {
+		t.Fatalf("expected TransitionSkippedError, got %v", err)
+	}
+	if skipped.Current != StatusProcessing || skipped.Target != StatusEnqueued {
+		t.Fatalf("unexpected skipped transition payload: %+v", skipped)
+	}
+
+	got, found, getErr := store.Get(ctx, req.ID)
+	if getErr != nil {
+		t.Fatalf("get request failed: %v", getErr)
+	}
+	if !found || got.Status != StatusProcessing {
+		t.Fatalf("expected request to remain processing after skipped regression, got found=%v req=%+v", found, got)
+	}
+}
+
 func newIntegrationRequestStore(t *testing.T, client *appredis.Client, suffix string) *RedisRequestStore {
 	t.Helper()
 	store, err := NewRedisRequestStore(client, RequestStoreConfig{
