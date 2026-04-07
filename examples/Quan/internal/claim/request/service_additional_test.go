@@ -84,6 +84,16 @@ func TestAcceptService_CreateExistsReturnsExistingRequest(t *testing.T) {
 
 func TestAcceptService_HotPathIdemHitReturnsRequestHandle(t *testing.T) {
 	store := newFakeRequestStore()
+	if err := store.Create(context.Background(), Request{
+		ID:             "req-idem-hotpath",
+		CouponID:       1012,
+		UserID:         2012,
+		IdempotencyKey: "idem-hotpath",
+		Status:         StatusSucceeded,
+		ClaimID:        9012,
+	}); err != nil {
+		t.Fatalf("seed request failed: %v", err)
+	}
 	hotpath := &fakeHotPath{
 		decision: Decision{Code: DecisionCodeIdemHit, RequestID: "req-idem-hotpath"},
 	}
@@ -98,7 +108,7 @@ func TestAcceptService_HotPathIdemHitReturnsRequestHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("accept should return request handle for hotpath idem hit: %v", err)
 	}
-	if got.RequestID != "req-idem-hotpath" || got.Status != StatusProcessing {
+	if got.RequestID != "req-idem-hotpath" || got.Status != StatusSucceeded {
 		t.Fatalf("expected processing request handle, got %+v", got)
 	}
 	if len(pub.published) != 0 {
@@ -169,6 +179,31 @@ func TestAcceptService_MarkEnqueuedDurabilityPendingReturnsWarningAndHandle(t *t
 	}
 	if !found || req.Status != StatusEnqueued {
 		t.Fatalf("expected request to be updated before warning return, got found=%v req=%+v", found, req)
+	}
+}
+
+func TestAcceptService_MarkEnqueuedSkippedReturnsCurrentStatus(t *testing.T) {
+	store := &skipToStatusStore{
+		RequestStore: newFakeRequestStore(),
+		skippedOn:    StatusEnqueued,
+		overrideTo:   StatusSucceeded,
+	}
+	pub := &fakePublisher{}
+	hotpath := &fakeHotPath{
+		decision: Decision{Code: DecisionCodeAdmitted, RequestID: "req-enqueued-skipped"},
+	}
+	svc := NewAcceptService(hotpath, store, pub)
+
+	got, err := svc.Accept(context.Background(), AcceptRequest{
+		CouponID:       1015,
+		UserID:         2015,
+		IdempotencyKey: "idem-enqueued-skipped",
+	})
+	if err != nil {
+		t.Fatalf("accept should reread current status when mark enqueued skips: %v", err)
+	}
+	if got.RequestID != "req-enqueued-skipped" || got.Status != StatusSucceeded {
+		t.Fatalf("expected reread succeeded status, got %+v", got)
 	}
 }
 
@@ -565,4 +600,24 @@ type compareSkipStore struct {
 
 func (s *compareSkipStore) CompareAndUpdateStatus(context.Context, Request, Status, int64, string) (bool, error) {
 	return false, nil
+}
+
+type skipToStatusStore struct {
+	RequestStore
+	skippedOn  Status
+	overrideTo Status
+}
+
+func (s *skipToStatusStore) UpdateStatus(ctx context.Context, requestID string, status Status, claimID int64, failureCode string) error {
+	if status == s.skippedOn {
+		if err := s.RequestStore.UpdateStatus(ctx, requestID, s.overrideTo, claimID, failureCode); err != nil {
+			return err
+		}
+		return TransitionSkippedError{
+			RequestID: requestID,
+			Current:   s.overrideTo,
+			Target:    status,
+		}
+	}
+	return s.RequestStore.UpdateStatus(ctx, requestID, status, claimID, failureCode)
 }

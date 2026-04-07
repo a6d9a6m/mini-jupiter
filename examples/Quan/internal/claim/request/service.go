@@ -67,6 +67,17 @@ func classifyStatusUpdate(err error) (applied bool, warning string, normalized e
 	return false, "", err
 }
 
+func (s *AcceptService) currentResponse(ctx context.Context, requestID string, fallback Status, warning string) AcceptResponse {
+	if requestID == "" || s == nil || s.store == nil {
+		return AcceptResponse{RequestID: requestID, Status: fallback, Warning: warning}
+	}
+	current, found, err := s.store.Get(ctx, requestID)
+	if err != nil || !found {
+		return AcceptResponse{RequestID: requestID, Status: fallback, Warning: warning}
+	}
+	return AcceptResponse{RequestID: current.ID, Status: current.Status, Warning: warning}
+}
+
 func (s *AcceptService) SetMetrics(metrics acceptMetrics) {
 	if s == nil || metrics == nil {
 		return
@@ -105,7 +116,7 @@ func (s *AcceptService) Accept(ctx context.Context, req AcceptRequest) (AcceptRe
 	}
 	if decision.Code == DecisionCodeIdemHit {
 		recordAcceptTiming(ctx, "idem_hit_from_hotpath", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
-		return AcceptResponse{RequestID: decision.RequestID, Status: StatusProcessing}, nil
+		return s.currentResponse(ctx, decision.RequestID, StatusProcessing, ""), nil
 	}
 	if decision.Code != DecisionCodeAdmitted {
 		recordAcceptTiming(ctx, "rejected", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
@@ -155,12 +166,14 @@ func (s *AcceptService) Accept(ctx context.Context, req AcceptRequest) (AcceptRe
 		publishDur = time.Since(stageStart)
 		stageStart = time.Now()
 		updateErr := s.store.UpdateStatus(ctx, record.ID, StatusPublishing, 0, "")
-		if applied, warning, normalizedErr := classifyStatusUpdate(updateErr); normalizedErr == nil {
+		applied := false
+		if a, warning, normalizedErr := classifyStatusUpdate(updateErr); normalizedErr == nil {
+			applied = a
 			if warning != "" {
 				respWarning = warning
 			}
 			updateErr = nil
-			if applied {
+			if a {
 				s.metrics.IncClaimRequestState(string(StatusPublishing))
 			}
 		}
@@ -171,6 +184,9 @@ func (s *AcceptService) Accept(ctx context.Context, req AcceptRequest) (AcceptRe
 		}
 		markEnqueueDur = time.Since(stageStart)
 		recordAcceptTiming(ctx, "publish_error", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
+		if !applied {
+			return s.currentResponse(ctx, record.ID, StatusPublishing, respWarning), nil
+		}
 		return AcceptResponse{RequestID: record.ID, Status: StatusPublishing, Warning: respWarning}, nil
 	}
 	publishDur = time.Since(stageStart)
@@ -194,6 +210,9 @@ func (s *AcceptService) Accept(ctx context.Context, req AcceptRequest) (AcceptRe
 		s.metrics.IncClaimRequestState(string(StatusEnqueued))
 	}
 	recordAcceptTiming(ctx, "accepted", idemLookupDur, decideDur, createDur, publishDur, markEnqueueDur, time.Since(startedAt))
+	if !applied {
+		return s.currentResponse(ctx, record.ID, StatusEnqueued, respWarning), nil
+	}
 	return AcceptResponse{RequestID: record.ID, Status: StatusEnqueued, Warning: respWarning}, nil
 }
 
