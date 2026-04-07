@@ -1,4 +1,4 @@
-package claim
+package reservation
 
 import (
 	"context"
@@ -6,34 +6,37 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"mini-jupiter/examples/Quan/internal/adjudication/hotpath"
+	claimmodel "mini-jupiter/examples/Quan/internal/claim/model"
 )
 
 type fakeReconcilerRepo struct {
 	findResults map[string]struct {
-		rec   ClaimRecord
+		rec   claimmodel.Record
 		found bool
 		err   error
 	}
 }
 
-func (f fakeReconcilerRepo) FindClaimByIdempotency(_ context.Context, couponID, userID int64, idemKey string) (ClaimRecord, bool, error) {
+func (f fakeReconcilerRepo) FindClaimByIdempotency(_ context.Context, couponID, userID int64, idemKey string) (claimmodel.Record, bool, error) {
 	key := reconcileLookupKey(couponID, userID, idemKey)
 	if res, ok := f.findResults[key]; ok {
 		return res.rec, res.found, res.err
 	}
-	return ClaimRecord{}, false, nil
+	return claimmodel.Record{}, false, nil
 }
 
 type fakeReconcilerAdjudicator struct {
-	leases        []reservationLease
+	leases        []hotpath.ReservationLease
 	finalizeErrID map[string]error
 	rollbackErrID map[string]error
 	finalized     []string
 	rolledBack    []string
 }
 
-func (f *fakeReconcilerAdjudicator) ListExpiredReservations(context.Context, time.Time, int) ([]reservationLease, error) {
-	cp := make([]reservationLease, len(f.leases))
+func (f *fakeReconcilerAdjudicator) ListExpiredReservations(context.Context, time.Time, int) ([]hotpath.ReservationLease, error) {
+	cp := make([]hotpath.ReservationLease, len(f.leases))
 	copy(cp, f.leases)
 	return cp, nil
 }
@@ -61,17 +64,17 @@ func (f *fakeReconcilerAdjudicator) Rollback(_ context.Context, _ int64, _ int64
 func TestReservationReconciler_LeaseFailureContinuesBatch(t *testing.T) {
 	repo := fakeReconcilerRepo{
 		findResults: map[string]struct {
-			rec   ClaimRecord
+			rec   claimmodel.Record
 			found bool
 			err   error
 		}{
 			reconcileLookupKey(1001, 2001, "idem-1"): {err: errors.New("mysql lookup failed")},
-			reconcileLookupKey(1002, 2002, "idem-2"): {found: true, rec: ClaimRecord{ID: 9002}},
+			reconcileLookupKey(1002, 2002, "idem-2"): {found: true, rec: claimmodel.Record{ID: 9002}},
 			reconcileLookupKey(1003, 2003, "idem-3"): {found: false},
 		},
 	}
 	adj := &fakeReconcilerAdjudicator{
-		leases: []reservationLease{
+		leases: []hotpath.ReservationLease{
 			{ReservationID: "lease-1", CouponID: 1001, UserID: 2001, IdemKey: "idem-1"},
 			{ReservationID: "lease-2", CouponID: 1002, UserID: 2002, IdemKey: "idem-2"},
 			{ReservationID: "lease-3", CouponID: 1003, UserID: 2003, IdemKey: "idem-3"},
@@ -96,17 +99,17 @@ func TestReservationReconciler_LeaseFailureContinuesBatch(t *testing.T) {
 func TestReservationReconciler_FinalizeAndRollbackFailureContinueBatch(t *testing.T) {
 	repo := fakeReconcilerRepo{
 		findResults: map[string]struct {
-			rec   ClaimRecord
+			rec   claimmodel.Record
 			found bool
 			err   error
 		}{
-			reconcileLookupKey(1001, 2001, "idem-1"): {found: true, rec: ClaimRecord{ID: 9001}},
+			reconcileLookupKey(1001, 2001, "idem-1"): {found: true, rec: claimmodel.Record{ID: 9001}},
 			reconcileLookupKey(1002, 2002, "idem-2"): {found: false},
-			reconcileLookupKey(1003, 2003, "idem-3"): {found: true, rec: ClaimRecord{ID: 9003}},
+			reconcileLookupKey(1003, 2003, "idem-3"): {found: true, rec: claimmodel.Record{ID: 9003}},
 		},
 	}
 	adj := &fakeReconcilerAdjudicator{
-		leases: []reservationLease{
+		leases: []hotpath.ReservationLease{
 			{ReservationID: "lease-1", CouponID: 1001, UserID: 2001, IdemKey: "idem-1"},
 			{ReservationID: "lease-2", CouponID: 1002, UserID: 2002, IdemKey: "idem-2"},
 			{ReservationID: "lease-3", CouponID: 1003, UserID: 2003, IdemKey: "idem-3"},

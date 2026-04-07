@@ -1,22 +1,28 @@
-package claim
+package reservation
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
+
+	"mini-jupiter/examples/Quan/internal/adjudication/hotpath"
+	claimrepo "mini-jupiter/examples/Quan/internal/claim/repository"
+	"mini-jupiter/examples/Quan/internal/testutil/quanenv"
+	"mini-jupiter/pkg/mysql"
 )
 
 func TestReservationReconciler_RollsBackExpiredLeaseWithoutPersistedClaim(t *testing.T) {
-	db := openIntegrationDB(t)
-	redisClient := openIntegrationRedis(t)
+	db := quanenv.OpenIntegrationDB(t, "reservation")
+	redisClient := quanenv.OpenIntegrationRedis(t, 4)
 	ctx := context.Background()
-	couponID := nextTestCouponID()
-	resetTestData(t, db, couponID)
-	createCampaign(t, db, couponID, 3, 1)
+	couponID := quanenv.NextCouponID()
+	quanenv.ResetTestData(t, db, couponID)
+	quanenv.CreateCampaign(t, db, couponID, 3, 1)
 
 	repo := newIntegrationRepository(t, db)
-	adjudicator := NewAdjudicator(redisClient)
+	adjudicator := hotpath.NewAdjudicator(redisClient)
 	adjudicator.SetLeaseTTL(50 * time.Millisecond)
 
 	campaign, err := repo.LoadCampaign(ctx, couponID)
@@ -32,17 +38,17 @@ func TestReservationReconciler_RollsBackExpiredLeaseWithoutPersistedClaim(t *tes
 	if err != nil {
 		t.Fatalf("redis decide failed: %v", err)
 	}
-	if decision.Code != decisionCodeAdmitted {
+	if decision.Code != hotpath.DecisionCodeAdmitted {
 		t.Fatalf("expected admitted decision, got %s", decision.Code)
 	}
 
-	if got := loadRedisCampaignStock(t, redisClient, couponID); got != 2 {
+	if got := quanenv.LoadRedisCampaignStock(t, redisClient, couponID, hotpath.CampaignStockKey); got != 2 {
 		t.Fatalf("expected redis stock 2 after reservation, got %d", got)
 	}
-	if got := loadRedisUserCount(t, redisClient, couponID, 94001); got != 1 {
+	if got := quanenv.LoadRedisUserCount(t, redisClient, couponID, 94001, hotpath.CampaignUserCountKey); got != 1 {
 		t.Fatalf("expected redis user count 1 after reservation, got %d", got)
 	}
-	if got := loadRedisIdemValue(t, redisClient, couponID, 94001, "lease-rollback"); got != "PENDING:"+decision.ReservationID {
+	if got := quanenv.LoadRedisString(t, redisClient, hotpath.IdemDecisionKey(couponID, 94001, "lease-rollback")); got != "PENDING:"+decision.ReservationID {
 		t.Fatalf("expected pending idem value, got %q", got)
 	}
 
@@ -62,16 +68,16 @@ func TestReservationReconciler_RollsBackExpiredLeaseWithoutPersistedClaim(t *tes
 	} else if found {
 		t.Fatal("expected no persisted claim after rollback reconciliation")
 	}
-	if got := loadRedisCampaignStock(t, redisClient, couponID); got != 3 {
+	if got := quanenv.LoadRedisCampaignStock(t, redisClient, couponID, hotpath.CampaignStockKey); got != 3 {
 		t.Fatalf("expected redis stock restored to 3, got %d", got)
 	}
-	if got := loadRedisUserCount(t, redisClient, couponID, 94001); got != 0 {
+	if got := quanenv.LoadRedisUserCount(t, redisClient, couponID, 94001, hotpath.CampaignUserCountKey); got != 0 {
 		t.Fatalf("expected redis user count restored to 0, got %d", got)
 	}
-	if got := loadRedisIdemValue(t, redisClient, couponID, 94001, "lease-rollback"); got != "" {
+	if got := quanenv.LoadRedisString(t, redisClient, hotpath.IdemDecisionKey(couponID, 94001, "lease-rollback")); got != "" {
 		t.Fatalf("expected idem key cleared after rollback, got %q", got)
 	}
-	if got := loadReservationLeaseState(t, redisClient, decision.ReservationID); got != "ROLLED_BACK" {
+	if got := quanenv.LoadRedisHashField(t, redisClient, hotpath.ReservationLeaseKey(decision.ReservationID), "state"); got != "ROLLED_BACK" {
 		t.Fatalf("expected lease state ROLLED_BACK, got %q", got)
 	}
 	if leases, err := adjudicator.ListExpiredReservations(ctx, now.Add(time.Minute), 10); err != nil {
@@ -82,15 +88,15 @@ func TestReservationReconciler_RollsBackExpiredLeaseWithoutPersistedClaim(t *tes
 }
 
 func TestReservationReconciler_FinalizesExpiredLeaseWhenClaimWasPersisted(t *testing.T) {
-	db := openIntegrationDB(t)
-	redisClient := openIntegrationRedis(t)
+	db := quanenv.OpenIntegrationDB(t, "reservation")
+	redisClient := quanenv.OpenIntegrationRedis(t, 4)
 	ctx := context.Background()
-	couponID := nextTestCouponID()
-	resetTestData(t, db, couponID)
-	createCampaign(t, db, couponID, 3, 1)
+	couponID := quanenv.NextCouponID()
+	quanenv.ResetTestData(t, db, couponID)
+	quanenv.CreateCampaign(t, db, couponID, 3, 1)
 
 	repo := newIntegrationRepository(t, db)
-	adjudicator := NewAdjudicator(redisClient)
+	adjudicator := hotpath.NewAdjudicator(redisClient)
 	adjudicator.SetLeaseTTL(50 * time.Millisecond)
 
 	campaign, err := repo.LoadCampaign(ctx, couponID)
@@ -106,7 +112,7 @@ func TestReservationReconciler_FinalizesExpiredLeaseWhenClaimWasPersisted(t *tes
 	if err != nil {
 		t.Fatalf("redis decide failed: %v", err)
 	}
-	if decision.Code != decisionCodeAdmitted {
+	if decision.Code != hotpath.DecisionCodeAdmitted {
 		t.Fatalf("expected admitted decision, got %s", decision.Code)
 	}
 
@@ -117,7 +123,7 @@ func TestReservationReconciler_FinalizesExpiredLeaseWhenClaimWasPersisted(t *tes
 	if rec.ID <= 0 {
 		t.Fatalf("expected persisted claim id, got %d", rec.ID)
 	}
-	if got := loadRedisIdemValue(t, redisClient, couponID, 95001, "lease-finalize"); got != "PENDING:"+decision.ReservationID {
+	if got := quanenv.LoadRedisString(t, redisClient, hotpath.IdemDecisionKey(couponID, 95001, "lease-finalize")); got != "PENDING:"+decision.ReservationID {
 		t.Fatalf("expected pending idem value before reconcile, got %q", got)
 	}
 
@@ -132,16 +138,16 @@ func TestReservationReconciler_FinalizesExpiredLeaseWhenClaimWasPersisted(t *tes
 		t.Fatalf("reconcile once failed: %v", err)
 	}
 
-	if got := loadRedisIdemValue(t, redisClient, couponID, 95001, "lease-finalize"); got != fmt.Sprintf("SUCCESS:%d", rec.ID) {
+	if got := quanenv.LoadRedisString(t, redisClient, hotpath.IdemDecisionKey(couponID, 95001, "lease-finalize")); got != fmt.Sprintf("SUCCESS:%d", rec.ID) {
 		t.Fatalf("expected success idem value after reconcile, got %q", got)
 	}
-	if got := loadRedisCampaignStock(t, redisClient, couponID); got != 2 {
+	if got := quanenv.LoadRedisCampaignStock(t, redisClient, couponID, hotpath.CampaignStockKey); got != 2 {
 		t.Fatalf("expected redis stock to stay reserved at 2, got %d", got)
 	}
-	if got := loadRedisUserCount(t, redisClient, couponID, 95001); got != 1 {
+	if got := quanenv.LoadRedisUserCount(t, redisClient, couponID, 95001, hotpath.CampaignUserCountKey); got != 1 {
 		t.Fatalf("expected redis user count to stay 1, got %d", got)
 	}
-	if got := loadReservationLeaseState(t, redisClient, decision.ReservationID); got != "FINALIZED" {
+	if got := quanenv.LoadRedisHashField(t, redisClient, hotpath.ReservationLeaseKey(decision.ReservationID), "state"); got != "FINALIZED" {
 		t.Fatalf("expected lease state FINALIZED, got %q", got)
 	}
 	if got := countClaimsByUser(t, db, couponID, 95001); got != 1 {
@@ -155,4 +161,39 @@ func TestReservationReconciler_FinalizesExpiredLeaseWhenClaimWasPersisted(t *tes
 	} else if len(leases) != 0 {
 		t.Fatalf("expected no expired reservations after finalize, got %d", len(leases))
 	}
+}
+
+func newIntegrationRepository(t *testing.T, db *sql.DB) *claimrepo.Repository {
+	t.Helper()
+	txm, err := mysql.NewTxManager(db)
+	if err != nil {
+		t.Fatalf("new tx manager failed: %v", err)
+	}
+	return claimrepo.NewRepository(db, txm)
+}
+
+func countClaimsByUser(t *testing.T, db *sql.DB, couponID, userID int64) int {
+	t.Helper()
+	var cnt int
+	if err := db.QueryRow(`
+SELECT COUNT(1)
+FROM coupon_claims
+WHERE coupon_id = ? AND user_id = ?
+`, couponID, userID).Scan(&cnt); err != nil {
+		t.Fatalf("count claims by user failed: %v", err)
+	}
+	return cnt
+}
+
+func loadCampaignStock(t *testing.T, db *sql.DB, couponID int64) int {
+	t.Helper()
+	var stock int
+	if err := db.QueryRow(`
+SELECT available_stock
+FROM coupon_campaigns
+WHERE coupon_id = ?
+`, couponID).Scan(&stock); err != nil {
+		t.Fatalf("query campaign stock failed: %v", err)
+	}
+	return stock
 }

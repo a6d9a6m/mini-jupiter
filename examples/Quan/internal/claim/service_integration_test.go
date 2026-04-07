@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	apperr "mini-jupiter/pkg/errors"
 )
 
 const testRedisAddrEnv = "QUAN_TEST_REDIS_ADDR"
@@ -68,57 +66,6 @@ func TestService_ConcurrentReplaySameIdempotencyUsesRedisReuse(t *testing.T) {
 	}
 	if got := loadCampaignStock(t, db, couponID); got != 9 {
 		t.Fatalf("expected available stock 9, got %d", got)
-	}
-}
-
-func TestService_DifferentIdempotencySameUserStillConflicts(t *testing.T) {
-	db := openIntegrationDB(t)
-	redisClient := openIntegrationRedis(t)
-	ctx := context.Background()
-	couponID := nextTestCouponID()
-	resetTestData(t, db, couponID)
-	createCampaign(t, db, couponID, 5, 1)
-
-	repo := newIntegrationRepository(t, db)
-	svc := NewService(repo, redisClient, 24*time.Hour)
-
-	rec, err := svc.Claim(ctx, couponID, 92001, "first-key")
-	if err != nil {
-		t.Fatalf("first claim failed: %v", err)
-	}
-	if rec.ID <= 0 {
-		t.Fatalf("expected persisted claim id, got %d", rec.ID)
-	}
-
-	_, err = svc.Claim(ctx, couponID, 92001, "second-key")
-	if err == nil {
-		t.Fatal("expected second claim to conflict")
-	}
-	if apperr.HTTPStatus(err) != 409 {
-		t.Fatalf("expected conflict status, got %d err=%v", apperr.HTTPStatus(err), err)
-	}
-}
-
-func TestService_SoldOutConflictFromRedisHotPath(t *testing.T) {
-	db := openIntegrationDB(t)
-	redisClient := openIntegrationRedis(t)
-	ctx := context.Background()
-	couponID := nextTestCouponID()
-	resetTestData(t, db, couponID)
-	createCampaign(t, db, couponID, 1, 1)
-
-	repo := newIntegrationRepository(t, db)
-	svc := NewService(repo, redisClient, 24*time.Hour)
-
-	if _, err := svc.Claim(ctx, couponID, 93001, "first-key"); err != nil {
-		t.Fatalf("first claim failed: %v", err)
-	}
-	_, err := svc.Claim(ctx, couponID, 93002, "second-key")
-	if err == nil {
-		t.Fatal("expected sold out error")
-	}
-	if apperr.HTTPStatus(err) != 409 {
-		t.Fatalf("expected conflict status, got %d err=%v", apperr.HTTPStatus(err), err)
 	}
 }
 

@@ -12,43 +12,40 @@ func TestMetricsRecorders(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("quan_test", reg, reg)
 
-	m.SetOutboxPending(5)
-	if got := testutil.ToFloat64(m.outboxPendingGauge); got != 5 {
-		t.Fatalf("expected outbox pending gauge 5, got %v", got)
+	m.ObserveClaimRequestAccept("success", "accepted", 120*time.Millisecond)
+	if got := testutil.ToFloat64(m.claimRequestAcceptTotal.WithLabelValues("success", "accepted")); got != 1 {
+		t.Fatalf("expected accept total 1, got %v", got)
 	}
 
-	m.IncTaskRetry()
-	m.IncTaskRetry()
-	if got := testutil.ToFloat64(m.taskRetryTotal); got != 2 {
-		t.Fatalf("expected retry total 2, got %v", got)
+	m.ObserveClaimRequestPublish("published", 30*time.Millisecond)
+	if got := testutil.ToFloat64(m.claimRequestPublishTotal.WithLabelValues("published")); got != 1 {
+		t.Fatalf("expected publish total 1, got %v", got)
 	}
 
-	m.IncTaskDLQ()
-	if got := testutil.ToFloat64(m.taskDLQTotal); got != 1 {
-		t.Fatalf("expected dlq total 1, got %v", got)
+	m.IncClaimRequestState("ENQUEUED")
+	m.IncClaimRequestState("SUCCEEDED")
+	if got := testutil.ToFloat64(m.claimRequestStateTotal.WithLabelValues("ENQUEUED")); got != 1 {
+		t.Fatalf("expected ENQUEUED transition total 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(m.claimRequestStateTotal.WithLabelValues("SUCCEEDED")); got != 1 {
+		t.Fatalf("expected SUCCEEDED transition total 1, got %v", got)
 	}
 
-	m.IncConsumeSuccess()
-	m.IncConsumeSuccess()
-	m.IncConsumeFailure()
-	if got := testutil.ToFloat64(m.taskConsumeTotal.WithLabelValues("success")); got != 2 {
-		t.Fatalf("expected consume success 2, got %v", got)
+	m.ObserveClaimRequestConsume("succeeded", 80*time.Millisecond)
+	m.ObserveClaimRequestConsume("retryable_persist_error", 60*time.Millisecond)
+	if got := testutil.ToFloat64(m.claimRequestConsumeTotal.WithLabelValues("succeeded")); got != 1 {
+		t.Fatalf("expected consume succeeded total 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.taskConsumeTotal.WithLabelValues("failed")); got != 1 {
-		t.Fatalf("expected consume failed 1, got %v", got)
+	if got := testutil.ToFloat64(m.claimRequestConsumeTotal.WithLabelValues("retryable_persist_error")); got != 1 {
+		t.Fatalf("expected consume retryable error total 1, got %v", got)
 	}
-	if got := testutil.ToFloat64(m.taskFailRateGauge); got < 0.333 || got > 0.334 {
-		t.Fatalf("expected fail rate around 1/3, got %v", got)
-	}
-
-	m.ObserveCouponClaim("business_conflict", "already_claimed", 120*time.Millisecond)
-	if got := testutil.ToFloat64(m.couponClaimTotal.WithLabelValues("business_conflict", "already_claimed")); got != 1 {
-		t.Fatalf("expected coupon claim total 1, got %v", got)
+	if got := testutil.ToFloat64(m.claimRequestConsumeFail); got < 0.49 || got > 0.51 {
+		t.Fatalf("expected consume fail rate around 0.5, got %v", got)
 	}
 
-	m.ObserveTaskRecovery("suspended", 2*time.Second)
-	if got := testutil.ToFloat64(m.taskRecoveryTotal.WithLabelValues("suspended")); got != 1 {
-		t.Fatalf("expected task recovery total 1, got %v", got)
+	m.ObserveClaimRequestReconcile("processing_finalize", "succeeded", 2*time.Second)
+	if got := testutil.ToFloat64(m.claimRequestReconcileTotal.WithLabelValues("processing_finalize", "succeeded")); got != 1 {
+		t.Fatalf("expected reconcile total 1, got %v", got)
 	}
 
 	m.ObserveAppError(409)

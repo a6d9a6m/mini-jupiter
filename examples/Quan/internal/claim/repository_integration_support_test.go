@@ -25,7 +25,12 @@ var testCouponIDSeed int64 = 900000
 func openIntegrationDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn, fromEnv := resolveTestMySQLDSN(t)
-	ensureDatabaseExists(t, dsn)
+	if err := ensureDatabaseExists(dsn); err != nil {
+		if !fromEnv {
+			t.Skipf("skip integration test: %s is not set and docker default mysql is unavailable: %v", testMySQLDSNEnv, err)
+		}
+		t.Fatalf("ensure test database failed: %v", err)
+	}
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -76,14 +81,13 @@ func resolveTestMySQLDSN(t *testing.T) (string, bool) {
 	return cfg.FormatDSN(), false
 }
 
-func ensureDatabaseExists(t *testing.T, dsn string) {
-	t.Helper()
+func ensureDatabaseExists(dsn string) error {
 	cfg, err := mysqldriver.ParseDSN(dsn)
 	if err != nil {
-		t.Fatalf("parse mysql dsn failed: %v", err)
+		return fmt.Errorf("parse mysql dsn failed: %w", err)
 	}
 	if cfg.DBName == "" {
-		return
+		return nil
 	}
 	targetDB := cfg.DBName
 
@@ -92,19 +96,20 @@ func ensureDatabaseExists(t *testing.T, dsn string) {
 	adminDSN := adminCfg.FormatDSN()
 	adminDB, err := sql.Open("mysql", adminDSN)
 	if err != nil {
-		t.Fatalf("open mysql admin connection failed: %v", err)
+		return fmt.Errorf("open mysql admin connection failed: %w", err)
 	}
 	defer adminDB.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := adminDB.PingContext(ctx); err != nil {
-		t.Fatalf("ping mysql admin connection failed: %v", err)
+		return fmt.Errorf("ping mysql admin connection failed: %w", err)
 	}
 	createDBSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci", escapeBackticks(targetDB))
 	if _, err := adminDB.ExecContext(ctx, createDBSQL); err != nil {
-		t.Fatalf("create test database failed: %v", err)
+		return fmt.Errorf("create test database failed: %w", err)
 	}
+	return nil
 }
 
 func escapeBackticks(s string) string {
@@ -121,7 +126,7 @@ func newIntegrationRepository(t *testing.T, db *sql.DB) *Repository {
 	if err != nil {
 		t.Fatalf("new tx manager failed: %v", err)
 	}
-	return NewRepository(db, txm, NewSideEffectRepository(db))
+	return NewRepository(db, txm)
 }
 
 func createCampaign(t *testing.T, db *sql.DB, couponID int64, stock int, perUserLimit int) {
@@ -196,39 +201,6 @@ WHERE coupon_id = ?
 		t.Fatalf("query campaign stock failed: %v", err)
 	}
 	return stock
-}
-
-func countAsyncTasksTotal(t *testing.T, db *sql.DB) int {
-	t.Helper()
-	var cnt int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM async_tasks`).Scan(&cnt); err != nil {
-		t.Fatalf("count async tasks failed: %v", err)
-	}
-	return cnt
-}
-
-func countOutboxEventsTotal(t *testing.T, db *sql.DB) int {
-	t.Helper()
-	var cnt int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM outbox_events`).Scan(&cnt); err != nil {
-		t.Fatalf("count outbox events failed: %v", err)
-	}
-	return cnt
-}
-
-func loadClaimSideEffectByClaim(t *testing.T, db *sql.DB, claimID int64) ClaimSideEffect {
-	t.Helper()
-	rec, err := scanClaimSideEffect(db.QueryRow(`
-SELECT side_effect_id, claim_id, effect_type, payload_json, status, retry_count, last_error,
-       COALESCE(async_task_id, 0), COALESCE(outbox_event_id, 0), created_at, updated_at
-FROM claim_side_effects
-WHERE claim_id = ? AND effect_type = ?
-LIMIT 1
-`, claimID, ClaimSideEffectTypeClaimCreated))
-	if err != nil {
-		t.Fatalf("load claim side effect failed: %v", err)
-	}
-	return rec
 }
 
 func openIntegrationRedis(t *testing.T) *redis.Client {

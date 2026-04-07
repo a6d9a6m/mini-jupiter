@@ -1,19 +1,21 @@
-package claim
+package hotpath
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"mini-jupiter/examples/Quan/internal/testutil/quanenv"
 )
 
 func TestAdjudicator_EnsureCampaign_RepairsIncompleteCampaignState(t *testing.T) {
-	redisClient := openIntegrationRedis(t)
+	redisClient := quanenv.OpenIntegrationRedis(t, 3)
 	ctx := context.Background()
 
 	adjudicator := NewAdjudicator(redisClient)
-	couponID := nextTestCouponID()
+	couponID := quanenv.NextCouponID()
 	now := time.Now().UTC()
-	campaign := campaignSnapshot{
+	campaign := CampaignSnapshot{
 		CouponID:       couponID,
 		Status:         "ACTIVE",
 		AvailableStock: 3,
@@ -22,7 +24,7 @@ func TestAdjudicator_EnsureCampaign_RepairsIncompleteCampaignState(t *testing.T)
 		EndAt:          now.Add(time.Hour),
 	}
 
-	if err := redisClient.Raw().Set(ctx, campaignStockKey(couponID), campaign.AvailableStock, 0).Err(); err != nil {
+	if err := redisClient.Raw().Set(ctx, CampaignStockKey(couponID), campaign.AvailableStock, 0).Err(); err != nil {
 		t.Fatalf("seed partial campaign stock failed: %v", err)
 	}
 
@@ -30,7 +32,7 @@ func TestAdjudicator_EnsureCampaign_RepairsIncompleteCampaignState(t *testing.T)
 		t.Fatalf("ensure campaign failed: %v", err)
 	}
 
-	meta, err := redisClient.Raw().HMGet(ctx, campaignMetaKey(couponID), "status", "start_ms", "end_ms", "per_user_limit").Result()
+	meta, err := redisClient.Raw().HMGet(ctx, CampaignMetaKey(couponID), "status", "start_ms", "end_ms", "per_user_limit").Result()
 	if err != nil {
 		t.Fatalf("load redis campaign meta failed: %v", err)
 	}
@@ -44,19 +46,19 @@ func TestAdjudicator_EnsureCampaign_RepairsIncompleteCampaignState(t *testing.T)
 	if err != nil {
 		t.Fatalf("decide failed after campaign repair: %v", err)
 	}
-	if decision.Code != decisionCodeAdmitted {
+	if decision.Code != DecisionCodeAdmitted {
 		t.Fatalf("expected admitted decision after campaign repair, got %q", decision.Code)
 	}
 }
 
 func TestAdjudicator_WaitResult_WakesOnFinalizePublish(t *testing.T) {
-	redisClient := openIntegrationRedis(t)
+	redisClient := quanenv.OpenIntegrationRedis(t, 3)
 	ctx := context.Background()
 
 	adjudicator := NewAdjudicator(redisClient)
-	couponID := nextTestCouponID()
+	couponID := quanenv.NextCouponID()
 	now := time.Now().UTC()
-	campaign := campaignSnapshot{
+	campaign := CampaignSnapshot{
 		CouponID:       couponID,
 		Status:         "ACTIVE",
 		AvailableStock: 3,
@@ -72,7 +74,7 @@ func TestAdjudicator_WaitResult_WakesOnFinalizePublish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide failed: %v", err)
 	}
-	if decision.Code != decisionCodeAdmitted {
+	if decision.Code != DecisionCodeAdmitted {
 		t.Fatalf("expected admitted decision, got %q", decision.Code)
 	}
 
@@ -109,13 +111,13 @@ func TestAdjudicator_WaitResult_WakesOnFinalizePublish(t *testing.T) {
 }
 
 func TestAdjudicator_WaitResult_CanceledContextDegradesToNoResult(t *testing.T) {
-	redisClient := openIntegrationRedis(t)
+	redisClient := quanenv.OpenIntegrationRedis(t, 3)
 	adjudicator := NewAdjudicator(redisClient)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	claimID, ok, err := adjudicator.WaitResult(ctx, nextTestCouponID(), 94003, "wait-canceled")
+	claimID, ok, err := adjudicator.WaitResult(ctx, quanenv.NextCouponID(), 94003, "wait-canceled")
 	if err != nil {
 		t.Fatalf("expected canceled wait to degrade without error, got %v", err)
 	}
