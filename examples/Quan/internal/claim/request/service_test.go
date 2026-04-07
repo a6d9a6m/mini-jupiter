@@ -494,6 +494,9 @@ func (f *fakeRequestStore) Create(_ context.Context, req Request) error {
 	if req.UpdatedAt.IsZero() {
 		req.UpdatedAt = now
 	}
+	if req.Version == 0 {
+		req.Version = 1
+	}
 	f.requests[req.ID] = req
 	return nil
 }
@@ -505,6 +508,7 @@ func (f *fakeRequestStore) UpdateStatus(_ context.Context, requestID string, sta
 	}
 	now := time.Now().UTC()
 	req.Status = status
+	req.Version++
 	if claimID != 0 {
 		req.ClaimID = claimID
 	}
@@ -525,7 +529,7 @@ func (f *fakeRequestStore) CompareAndUpdateStatus(ctx context.Context, snapshot 
 	if !ok {
 		return false, ErrRequestNotFound
 	}
-	if req.Status != snapshot.Status || !req.UpdatedAt.Equal(snapshot.UpdatedAt) {
+	if req.Status != snapshot.Status || req.Version != snapshot.Version {
 		return false, nil
 	}
 	return true, f.UpdateStatus(ctx, snapshot.ID, status, claimID, failureCode)

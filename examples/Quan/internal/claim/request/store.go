@@ -82,17 +82,18 @@ redis.call('HSET', KEYS[1],
   'idempotency_key', ARGV[4],
   'reservation_id', ARGV[5],
   'status', ARGV[6],
-  'claim_id', ARGV[7],
-  'failure_code', ARGV[8],
-  'accepted_at_ms', ARGV[9],
-  'processed_at_ms', ARGV[10],
-  'finished_at_ms', ARGV[11],
-  'updated_at_ms', ARGV[12]
+  'version', ARGV[7],
+  'claim_id', ARGV[8],
+  'failure_code', ARGV[9],
+  'accepted_at_ms', ARGV[10],
+  'processed_at_ms', ARGV[11],
+  'finished_at_ms', ARGV[12],
+  'updated_at_ms', ARGV[13]
 )
-redis.call('PEXPIRE', KEYS[1], ARGV[13])
-redis.call('ZADD', KEYS[2], ARGV[14], ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[14])
+redis.call('ZADD', KEYS[2], ARGV[15], ARGV[1])
 if idem_key ~= '' then
-  redis.call('SET', idem_key, ARGV[1], 'PX', ARGV[13])
+  redis.call('SET', idem_key, ARGV[1], 'PX', ARGV[14])
 end
 return {'CREATED', ARGV[1]}
 `, []string{key, s.statusKey(req.Status), idemKey},
@@ -102,6 +103,7 @@ return {'CREATED', ARGV[1]}
 		req.IdempotencyKey,
 		req.ReservationID,
 		string(req.Status),
+		"1",
 		strconv.FormatInt(req.ClaimID, 10),
 		req.FailureCode,
 		strconv.FormatInt(nowMs, 10),
@@ -135,6 +137,7 @@ local current = redis.call('HGET', KEYS[1], 'status')
 if current == false or current == nil then
   return {'NOT_FOUND'}
 end
+local current_version = tonumber(redis.call('HGET', KEYS[1], 'version') or '0')
 local target = ARGV[1]
 local allowed_csv = ARGV[2]
 local allowed = {}
@@ -144,7 +147,8 @@ end
 if not allowed[current] then
   return {'SKIPPED', current}
 end
-redis.call('HSET', KEYS[1], 'status', target, 'failure_code', ARGV[3], 'updated_at_ms', ARGV[4])
+local next_version = current_version + 1
+redis.call('HSET', KEYS[1], 'status', target, 'failure_code', ARGV[3], 'updated_at_ms', ARGV[4], 'version', next_version)
 if tonumber(ARGV[5]) > 0 then
   redis.call('HSET', KEYS[1], 'claim_id', ARGV[5])
 end
@@ -218,12 +222,12 @@ local current = redis.call('HGET', KEYS[1], 'status')
 if current == false or current == nil then
   return {'NOT_FOUND'}
 end
-local updated_at = redis.call('HGET', KEYS[1], 'updated_at_ms')
-if updated_at ~= ARGV[10] then
-  return {'STALE', current, updated_at}
+local current_version = redis.call('HGET', KEYS[1], 'version')
+if current_version ~= ARGV[10] then
+  return {'STALE', current, current_version}
 end
 if current ~= ARGV[11] then
-  return {'STALE', current, updated_at}
+  return {'STALE', current, current_version}
 end
 local target = ARGV[1]
 local allowed_csv = ARGV[2]
@@ -234,7 +238,8 @@ end
 if not allowed[current] then
   return {'SKIPPED', current}
 end
-redis.call('HSET', KEYS[1], 'status', target, 'failure_code', ARGV[3], 'updated_at_ms', ARGV[4])
+local next_version = tonumber(current_version) + 1
+redis.call('HSET', KEYS[1], 'status', target, 'failure_code', ARGV[3], 'updated_at_ms', ARGV[4], 'version', next_version)
 if tonumber(ARGV[5]) > 0 then
   redis.call('HSET', KEYS[1], 'claim_id', ARGV[5])
 end
@@ -269,7 +274,7 @@ return {'UPDATED', current}
 		strconv.Itoa(statusKeyIndex(status)),
 		snapshot.ID,
 		strconv.FormatInt(nowMs, 10),
-		strconv.FormatInt(snapshot.UpdatedAt.UTC().UnixMilli(), 10),
+		strconv.FormatInt(snapshot.Version, 10),
 		string(snapshot.Status),
 	).StringSlice()
 	if err != nil {
@@ -417,6 +422,7 @@ func requestFields(req Request, nowMs int64) map[string]any {
 		"idempotency_key": req.IdempotencyKey,
 		"reservation_id":  req.ReservationID,
 		"status":          string(req.Status),
+		"version":         req.Version,
 		"claim_id":        req.ClaimID,
 		"failure_code":    req.FailureCode,
 		"accepted_at_ms":  nowMs,
@@ -440,6 +446,11 @@ func parseRequest(fields map[string]string) (Request, error) {
 	}
 	if req.UserID, err = parseInt64Field(fields, "user_id"); err != nil {
 		return Request{}, err
+	}
+	if fields["version"] != "" {
+		if req.Version, err = parseInt64Field(fields, "version"); err != nil {
+			return Request{}, err
+		}
 	}
 	if fields["claim_id"] != "" {
 		if req.ClaimID, err = parseInt64Field(fields, "claim_id"); err != nil {
@@ -493,7 +504,7 @@ func allowedPreviousStatuses(target Status) []Status {
 	case StatusAccepted:
 		return []Status{StatusAccepted}
 	case StatusPublishing:
-		return []Status{StatusAccepted, StatusPublishing}
+		return []Status{StatusAccepted, StatusPublishing, StatusEnqueued, StatusProcessing}
 	case StatusEnqueued:
 		return []Status{StatusAccepted, StatusPublishing, StatusEnqueued}
 	case StatusProcessing:

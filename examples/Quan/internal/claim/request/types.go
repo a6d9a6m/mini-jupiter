@@ -135,6 +135,7 @@ type Request struct {
 	IdempotencyKey string
 	ReservationID  string
 	Status         Status
+	Version        int64
 	ClaimID        int64
 	FailureCode    string
 	AcceptedAt     time.Time
