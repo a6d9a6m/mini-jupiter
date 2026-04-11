@@ -97,7 +97,9 @@ func queueMessageCount(client interface{ Channel() (*amqp.Channel, error) }, que
 		return 0, err
 	}
 	defer ch.Close()
-	state, err := ch.QueueInspect(queue)
+	state, err := ch.QueueDeclarePassive(queue, true, false, false, false, amqp.Table{
+		"x-queue-type": "classic",
+	})
 	if err != nil {
 		return 0, err
 	}

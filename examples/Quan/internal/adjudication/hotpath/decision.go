@@ -37,13 +37,6 @@ type CampaignSnapshot struct {
 	EndAt          time.Time
 }
 
-type decisionStatus string
-
-const (
-	decisionPending decisionStatus = "PENDING"
-	decisionSuccess decisionStatus = "SUCCESS"
-)
-
 type ClaimDecision struct {
 	Code          string
 	ClaimID       int64

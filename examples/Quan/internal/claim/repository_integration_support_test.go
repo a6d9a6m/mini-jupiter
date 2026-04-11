@@ -232,54 +232,9 @@ func openIntegrationRedis(t *testing.T) *redis.Client {
 	return client
 }
 
-func loadRedisCampaignStock(t *testing.T, client *redis.Client, couponID int64) int {
-	t.Helper()
-	val, err := client.Raw().Get(context.Background(), campaignStockKey(couponID)).Int()
-	if err != nil {
-		t.Fatalf("load redis campaign stock failed: %v", err)
-	}
-	return val
-}
-
-func loadRedisUserCount(t *testing.T, client *redis.Client, couponID, userID int64) int {
-	t.Helper()
-	val, err := client.Raw().HGet(context.Background(), campaignUserCountKey(couponID), fmt.Sprintf("%d", userID)).Int()
-	if err != nil {
-		if strings.Contains(err.Error(), "redis: nil") {
-			return 0
-		}
-		t.Fatalf("load redis user count failed: %v", err)
-	}
-	return val
-}
-
-func loadRedisIdemValue(t *testing.T, client *redis.Client, couponID, userID int64, idemKey string) string {
-	t.Helper()
-	val, err := client.Raw().Get(context.Background(), idemDecisionKey(couponID, userID, idemKey)).Result()
-	if err != nil {
-		if strings.Contains(err.Error(), "redis: nil") {
-			return ""
-		}
-		t.Fatalf("load redis idem value failed: %v", err)
-	}
-	return val
-}
-
-func loadReservationLeaseState(t *testing.T, client *redis.Client, reservationID string) string {
-	t.Helper()
-	val, err := client.Raw().HGet(context.Background(), reservationLeaseKey(reservationID), "state").Result()
-	if err != nil {
-		if strings.Contains(err.Error(), "redis: nil") {
-			return ""
-		}
-		t.Fatalf("load reservation lease state failed: %v", err)
-	}
-	return val
-}
-
 func loadRedisClaimCache(t *testing.T, client *redis.Client, couponID, userID int64) string {
 	t.Helper()
-	val, err := client.Raw().Get(context.Background(), claimCacheKey(couponID, userID)).Result()
+	val, err := client.Raw().Get(context.Background(), ClaimCacheKey(couponID, userID)).Result()
 	if err != nil {
 		if strings.Contains(err.Error(), "redis: nil") {
 			return ""

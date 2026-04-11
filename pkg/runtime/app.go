@@ -56,7 +56,9 @@ func (a *App) Stop(ctx context.Context) error {
 }
 
 func (a *App) stopReverse(ctx context.Context, comps []Component) error {
-	ctx = withDefaultTimeout(ctx, a.stopTimeout)
+	var cancel context.CancelFunc
+	ctx, cancel = withDefaultTimeout(ctx, a.stopTimeout)
+	defer cancel()
 	var (
 		wg  sync.WaitGroup
 		mu  sync.Mutex
@@ -81,13 +83,12 @@ func (a *App) stopReverse(ctx context.Context, comps []Component) error {
 	return nil
 }
 
-func withDefaultTimeout(ctx context.Context, d time.Duration) context.Context {
+func withDefaultTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if _, ok := ctx.Deadline(); ok {
-		return ctx
+		return ctx, func() {}
 	}
-	c, _ := context.WithTimeout(ctx, d)
-	return c
+	return context.WithTimeout(ctx, d)
 }

@@ -3,7 +3,6 @@ package request
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"sync"
@@ -439,19 +438,6 @@ func restartDockerContainer(ctx context.Context, container string) error {
 		return fmt.Errorf("docker restart %s failed: %w: %s", container, err, string(out))
 	}
 	return nil
-}
-
-func waitForTCP(addr string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return fmt.Errorf("tcp %s not reachable within %s", addr, timeout)
 }
 
 func waitForRabbitMQReady(url string, timeout time.Duration) error {

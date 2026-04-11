@@ -111,10 +111,13 @@ func (a *Adjudicator) ListExpiredReservations(ctx context.Context, now time.Time
 	if limit <= 0 {
 		limit = 100
 	}
-	ids, err := a.rdb.ZRangeByScore(ctx, ReservationLeaseIndexKey(), &goredis.ZRangeBy{
-		Min:   "-inf",
-		Max:   strconv.FormatInt(now.UTC().UnixMilli(), 10),
-		Count: int64(limit),
+	ids, err := a.rdb.ZRangeArgs(ctx, goredis.ZRangeArgs{
+		Key:     ReservationLeaseIndexKey(),
+		Start:   "-inf",
+		Stop:    strconv.FormatInt(now.UTC().UnixMilli(), 10),
+		ByScore: true,
+		Offset:  0,
+		Count:   int64(limit),
 	}).Result()
 	if err != nil {
 		return nil, err

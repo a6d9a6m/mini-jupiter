@@ -414,24 +414,6 @@ func (s *RedisRequestStore) wait(ctx context.Context, requestID string, status S
 	}
 }
 
-func requestFields(req Request, nowMs int64) map[string]any {
-	return map[string]any{
-		"request_id":      req.ID,
-		"coupon_id":       req.CouponID,
-		"user_id":         req.UserID,
-		"idempotency_key": req.IdempotencyKey,
-		"reservation_id":  req.ReservationID,
-		"status":          string(req.Status),
-		"version":         req.Version,
-		"claim_id":        req.ClaimID,
-		"failure_code":    req.FailureCode,
-		"accepted_at_ms":  nowMs,
-		"processed_at_ms": 0,
-		"finished_at_ms":  0,
-		"updated_at_ms":   nowMs,
-	}
-}
-
 func parseRequest(fields map[string]string) (Request, error) {
 	req := Request{
 		ID:             fields["request_id"],
@@ -493,10 +475,6 @@ func parseOptionalUnixMilliField(fields map[string]string, key string) (time.Tim
 		return time.Time{}, nil
 	}
 	return parseUnixMilliField(fields, key)
-}
-
-func isTerminalStatus(status Status) bool {
-	return status == StatusSucceeded || status == StatusRolledBack || status == StatusFailed
 }
 
 func allowedPreviousStatuses(target Status) []Status {

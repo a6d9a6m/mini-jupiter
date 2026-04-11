@@ -503,7 +503,7 @@ func (f *fakeRequestStore) Create(_ context.Context, req Request) error {
 
 func (f *fakeRequestStore) UpdateStatus(_ context.Context, requestID string, status Status, claimID int64, failureCode string) error {
 	req := f.requests[requestID]
-	if isTerminalStatus(req.Status) && !isTerminalStatus(status) {
+	if testIsTerminalStatus(req.Status) && !testIsTerminalStatus(status) {
 		return nil
 	}
 	now := time.Now().UTC()
@@ -522,6 +522,10 @@ func (f *fakeRequestStore) UpdateStatus(_ context.Context, requestID string, sta
 	}
 	f.requests[requestID] = req
 	return nil
+}
+
+func testIsTerminalStatus(status Status) bool {
+	return status == StatusSucceeded || status == StatusRolledBack || status == StatusFailed
 }
 
 func (f *fakeRequestStore) CompareAndUpdateStatus(ctx context.Context, snapshot Request, status Status, claimID int64, failureCode string) (bool, error) {

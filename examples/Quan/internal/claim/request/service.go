@@ -44,16 +44,6 @@ func acceptDurabilityWarning(err error) (string, error) {
 	return "", err
 }
 
-func ignoreDurabilityPending(err error) error {
-	if err == nil {
-		return nil
-	}
-	if _, ok := AsDurabilityPendingError(err); ok {
-		return nil
-	}
-	return err
-}
-
 func classifyStatusUpdate(err error) (applied bool, warning string, normalized error) {
 	if err == nil {
 		return true, "", nil
